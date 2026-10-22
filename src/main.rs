@@ -1,11 +1,6 @@
 use clap::Parser;
+use git_dag_parser::{cli, commands};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-mod cli;
-mod commands;
-mod error;
-mod models;
-mod parser;
 
 fn main() -> anyhow::Result<()> {
     // Initialize tracing
