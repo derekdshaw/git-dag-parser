@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use tracing::info;
@@ -9,41 +10,37 @@ use crate::parser;
 
 /// Run the init command: parse a Git repository and build the DAG
 pub fn run(repo_path: &Path, output: &Option<PathBuf>) -> Result<()> {
+    let start = Instant::now();
+
     info!("Initializing DAG from repository: {}", repo_path.display());
 
     // Validate repository
     let git_dir = find_git_dir(repo_path)?;
     info!("Found .git directory: {}", git_dir.display());
 
-    // Determine output path
-    let output_path = output
-        .clone()
-        .unwrap_or_else(|| repo_path.join(".git-dag.bin"));
-
     // Phase 1: Parse all objects from pack files and loose objects
     info!("Phase 1: Parsing Git objects...");
+    let phase1_start = Instant::now();
     let (commits_raw, trees_raw, hash_index, mut container) =
         parser::parse_objects(&git_dir).context("Failed to parse Git objects")?;
-
-    info!(
-        "Parsed {} commits, {} trees, {} blobs, {} tags",
-        container.commits.len(),
-        container.trees.len(),
-        container.blobs.len(),
-        container.tags.len()
-    );
+    let phase1_elapsed = phase1_start.elapsed();
 
     // Phase 2: Walk commit trees and build relationships
     info!("Phase 2: Building relationships...");
-    parser::build_relationships(&commits_raw, &trees_raw, &hash_index, &mut container)
+    let phase2_start = Instant::now();
+    parser::build_relationships(commits_raw, trees_raw, &hash_index, &mut container)
         .context("Failed to build relationships")?;
+    let phase2_elapsed = phase2_start.elapsed();
 
-    // Save the DAG
-    info!("Saving DAG to: {}", output_path.display());
-    save_dag(&container, &output_path).context("Failed to save DAG")?;
+    // Save the DAG if output path specified
+    if let Some(output_path) = output {
+        info!("Saving DAG to: {}", output_path.display());
+        save_dag(&container, output_path).context("Failed to save DAG")?;
+        println!("DAG saved to: {}", output_path.display());
+    }
 
-    info!("Done! DAG saved to: {}", output_path.display());
-    print_summary(&container);
+    let total_elapsed = start.elapsed();
+    print_summary(&container, phase1_elapsed, phase2_elapsed, total_elapsed);
 
     Ok(())
 }
@@ -86,7 +83,6 @@ fn find_git_dir(repo_path: &Path) -> Result<PathBuf> {
 /// Save the DAG to a binary file
 fn save_dag(container: &ObjectContainer, path: &Path) -> Result<()> {
     // TODO: Implement binary serialization
-    // For now, just create a placeholder
     let json = serde_json::to_string_pretty(container)
         .map_err(|e| DagError::Serialization(e.to_string()))?;
 
@@ -95,32 +91,27 @@ fn save_dag(container: &ObjectContainer, path: &Path) -> Result<()> {
 }
 
 /// Print a summary of the parsed DAG
-fn print_summary(container: &ObjectContainer) {
+fn print_summary(
+    container: &ObjectContainer,
+    phase1: std::time::Duration,
+    phase2: std::time::Duration,
+    total: std::time::Duration,
+) {
     println!("\n=== DAG Summary ===");
     println!("Commits: {}", container.commits.len());
     println!("Trees:   {}", container.trees.len());
     println!("Blobs:   {}", container.blobs.len());
     println!("Tags:    {}", container.tags.len());
-
-    // Calculate total sizes
-    let total_size: u64 = container.commits.iter().map(|c| c.size as u64).sum::<u64>()
-        + container.trees.iter().map(|t| t.size as u64).sum::<u64>()
-        + container.blobs.iter().map(|b| b.size as u64).sum::<u64>()
-        + container.tags.iter().map(|t| t.size as u64).sum::<u64>();
-
-    let total_disk_size: u64 = container.commits.iter().map(|c| c.size_disk as u64).sum::<u64>()
-        + container.trees.iter().map(|t| t.size_disk as u64).sum::<u64>()
-        + container.blobs.iter().map(|b| b.size_disk as u64).sum::<u64>()
-        + container.tags.iter().map(|t| t.size_disk as u64).sum::<u64>();
-
     println!(
-        "\nTotal size:      {} ({:.2} MB)",
-        total_size,
-        total_size as f64 / (1024.0 * 1024.0)
+        "Total:   {}",
+        container.commits.len()
+            + container.trees.len()
+            + container.blobs.len()
+            + container.tags.len()
     );
-    println!(
-        "Total disk size: {} ({:.2} MB)",
-        total_disk_size,
-        total_disk_size as f64 / (1024.0 * 1024.0)
-    );
+
+    println!("\n=== Timing ===");
+    println!("Phase 1 (parse):          {:?}", phase1);
+    println!("Phase 2 (relationships):  {:?}", phase2);
+    println!("Total:                    {:?}", total);
 }

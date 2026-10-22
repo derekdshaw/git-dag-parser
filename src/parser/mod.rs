@@ -3,6 +3,7 @@ mod pack;
 mod relationships;
 
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::Result;
 use hashbrown::HashMap;
@@ -60,10 +61,14 @@ pub fn parse_objects(
     }
 
     // Resolve tree entry indices now that all objects are indexed
+    let resolve_start = Instant::now();
     resolve_tree_entries(&mut trees_raw, &hash_index);
+    println!("Resolved tree entry indices in {:?}", resolve_start.elapsed());
 
     // Build static tree↔blob relationships
+    let static_start = Instant::now();
     build_static_relationships(&trees_raw, &mut container);
+    println!("Built static relationships in {:?}", static_start.elapsed());
 
     Ok((commits_raw, trees_raw, hash_index, container))
 }
@@ -72,10 +77,12 @@ pub fn parse_objects(
 fn resolve_tree_entries(trees_raw: &mut HashMap<ObjectHash, TreeRaw>, hash_index: &HashIndex) {
     for tree_raw in trees_raw.values_mut() {
         for entry in &mut tree_raw.entries {
-            entry.child_idx = if entry.is_tree {
+            entry.child_idx = if entry.kind.is_tree() {
                 hash_index.trees.get(&entry.hash).copied()
-            } else {
+            } else if entry.kind.is_blob() {
                 hash_index.blobs.get(&entry.hash).copied()
+            } else {
+                None // Submodules reference external commits
             };
         }
     }
@@ -92,11 +99,11 @@ fn build_static_relationships(
 
         for entry in &tree_raw.entries {
             if let Some(child_idx) = entry.child_idx {
-                if entry.is_tree {
+                if entry.kind.is_tree() {
                     // Tree → Subtree relationship
                     container.trees[tree_idx].subtrees.push(child_idx);
                 } else {
-                    // Tree → Blob relationship
+                    // Tree → Blob relationship (regular files, executables, symlinks)
                     container.trees[tree_idx].blobs.push(child_idx);
                     // Blob → Tree relationship (reverse)
                     container.blobs[child_idx].trees.push(tree_idx);

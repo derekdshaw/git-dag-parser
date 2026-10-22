@@ -25,6 +25,7 @@ impl ObjectContainer {
     }
 
     /// Pre-allocate capacity based on expected object counts
+    #[allow(dead_code)]
     pub fn with_capacity(commits: usize, trees: usize, blobs: usize, tags: usize) -> Self {
         Self {
             commits: Vec::with_capacity(commits),
@@ -50,6 +51,7 @@ impl HashIndex {
     }
 
     /// Pre-allocate capacity based on expected object counts
+    #[allow(dead_code)]
     pub fn with_capacity(commits: usize, trees: usize, blobs: usize, tags: usize) -> Self {
         Self {
             commits: HashMap::with_capacity(commits),
@@ -80,31 +82,86 @@ pub struct TreeRaw {
     pub entries: Vec<TreeEntry>,
 }
 
+/// Git file mode constants
+pub mod mode {
+    pub const TREE: u32 = 0o040000;
+    pub const REGULAR: u32 = 0o100644;
+    pub const EXECUTABLE: u32 = 0o100755;
+    pub const SYMLINK: u32 = 0o120000;
+    pub const SUBMODULE: u32 = 0o160000;
+}
+
+/// The kind of object a tree entry references
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u32)]
+pub enum FileKind {
+    /// Directory (tree object)
+    Tree = mode::TREE,
+    /// Regular file
+    Regular = mode::REGULAR,
+    /// Executable file
+    Executable = mode::EXECUTABLE,
+    /// Symbolic link
+    Symlink = mode::SYMLINK,
+    /// Gitlink (submodule reference)
+    Submodule = mode::SUBMODULE,
+}
+
+impl FileKind {
+    /// Parse a mode value into a FileKind
+    #[inline]
+    pub fn from_mode(mode: u32) -> Option<Self> {
+        match mode {
+            mode::TREE => Some(Self::Tree),
+            mode::REGULAR => Some(Self::Regular),
+            mode::EXECUTABLE => Some(Self::Executable),
+            mode::SYMLINK => Some(Self::Symlink),
+            mode::SUBMODULE => Some(Self::Submodule),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is a tree (directory)
+    #[inline]
+    pub fn is_tree(self) -> bool {
+        matches!(self, Self::Tree)
+    }
+
+    /// Returns true if this is a blob (file, symlink, but not submodule)
+    #[inline]
+    pub fn is_blob(self) -> bool {
+        matches!(self, Self::Regular | Self::Executable | Self::Symlink)
+    }
+
+    /// Returns the raw mode value
+    #[inline]
+    pub fn mode(self) -> u32 {
+        self as u32
+    }
+}
+
 /// A single entry in a tree object
 #[derive(Debug, Clone)]
 pub struct TreeEntry {
-    /// File mode (e.g., 100644 for regular file, 040000 for directory)
-    pub mode: u32,
     /// Entry name (filename or directory name)
     pub name: String,
     /// Hash of the referenced object (blob or subtree)
     pub hash: ObjectHash,
     /// Resolved index of the child object (set after all objects are indexed)
     pub child_idx: Option<usize>,
-    /// True if this entry is a tree (directory), false if blob (file)
-    pub is_tree: bool,
+    /// The kind of entry (tree, regular file, executable, symlink, submodule)
+    pub kind: FileKind,
 }
 
 impl TreeEntry {
     /// Create a new tree entry
     pub fn new(mode: u32, name: String, hash: ObjectHash) -> Self {
-        let is_tree = mode == 0o040000;
+        let kind = FileKind::from_mode(mode).unwrap_or(FileKind::Regular);
         Self {
-            mode,
             name,
             hash,
             child_idx: None,
-            is_tree,
+            kind,
         }
     }
 }

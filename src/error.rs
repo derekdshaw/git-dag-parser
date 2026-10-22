@@ -9,6 +9,7 @@ pub enum ParseError {
     #[error("Unsupported pack version: {0}")]
     UnsupportedPackVersion(u32),
 
+    #[allow(dead_code)]
     #[error("Invalid object type: {0}")]
     InvalidObjectType(u8),
 
@@ -21,6 +22,7 @@ pub enum ParseError {
     #[error("Object not found: {0}")]
     ObjectNotFound(String),
 
+    #[allow(dead_code)]
     #[error("Delta base not found at offset {0}")]
     DeltaBaseNotFound(u64),
 
@@ -37,15 +39,18 @@ pub enum ParseError {
 /// Errors that can occur during DAG operations
 #[derive(Error, Debug)]
 pub enum DagError {
+    #[allow(dead_code)]
     #[error("Repository not found at: {0}")]
     RepoNotFound(String),
 
     #[error("Not a valid Git repository: {0}")]
     NotAGitRepo(String),
 
+    #[allow(dead_code)]
     #[error("DAG file not found: {0}")]
     DagFileNotFound(String),
 
+    #[allow(dead_code)]
     #[error("Invalid DAG file format: {0}")]
     InvalidDagFormat(String),
 

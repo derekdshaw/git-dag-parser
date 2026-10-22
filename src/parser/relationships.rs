@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::Result;
-use crossbeam_channel::{bounded, Sender};
+use crossbeam_channel::bounded;
 use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::info;
@@ -10,32 +10,51 @@ use tracing::info;
 use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw, WalkResult};
 use crate::models::ObjectContainer;
 
+/// Shared read-only data passed to worker threads (no cloning, just Arc)
+struct WorkerContext {
+    trees_raw: HashMap<ObjectHash, TreeRaw>,
+    commits_raw: HashMap<ObjectHash, CommitRaw>,
+}
+
 /// Build commit↔tree and commit↔blob relationships using parallel workers
 ///
-/// Architecture:
-/// - Main thread partitions commits across worker threads
-/// - Worker threads walk commit trees and produce WalkResults (pure functions, read-only)
-/// - Worker threads send results via channel to main thread
-/// - Main thread merges results into ObjectContainer (exclusive access, no locks)
+/// Uses tree-diff approach: for each commit, compare its tree to its parent's tree
+/// and only record objects that are NEW or CHANGED in that commit. This is equivalent
+/// to `git rev-list --objects <commit>~1..<commit>` but done in-process.
+///
+/// Takes ownership of commits_raw and trees_raw to avoid expensive clones.
+/// These are wrapped in a single Arc and shared read-only across all workers.
 pub fn build_relationships(
-    commits_raw: &HashMap<ObjectHash, CommitRaw>,
-    trees_raw: &HashMap<ObjectHash, TreeRaw>,
-    hash_index: &HashIndex,
+    commits_raw: HashMap<ObjectHash, CommitRaw>,
+    trees_raw: HashMap<ObjectHash, TreeRaw>,
+    _hash_index: &HashIndex,
     container: &mut ObjectContainer,
 ) -> Result<()> {
     let num_workers = num_cpus::get();
     let total_commits = commits_raw.len();
 
-    info!(
-        "Building relationships with {} workers for {} commits",
-        num_workers, total_commits
+    println!(
+        "Building relationships: {} commits, {} workers",
+        total_commits, num_workers
     );
+
+    // Collect lightweight commit info for partitioning BEFORE moving into Arc
+    let commit_work: Vec<(usize, ObjectHash, Vec<ObjectHash>)> = commits_raw
+        .values()
+        .map(|raw| (raw.index, raw.root_tree_hash, raw.parent_hashes.clone()))
+        .collect();
+
+    // Move data into Arc once - zero clones of the big HashMaps
+    let context = Arc::new(WorkerContext {
+        trees_raw,
+        commits_raw,
+    });
 
     // Progress bar
     let progress = ProgressBar::new(total_commits as u64);
     progress.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) ({eta}) {msg}")
             .expect("valid template")
             .progress_chars("#>-"),
     );
@@ -43,140 +62,155 @@ pub fn build_relationships(
     // Channel for results (bounded to prevent memory blowup)
     let (tx, rx) = bounded::<WalkResult>(num_workers * 4);
 
-    // Wrap read-only data in Arc for sharing (clone the referenced data, not the reference)
-    let trees_raw: Arc<HashMap<ObjectHash, TreeRaw>> = Arc::new((*trees_raw).clone());
-    let hash_index_trees: Arc<HashMap<ObjectHash, usize>> = Arc::new(hash_index.trees.clone());
-
-    // Collect commits for partitioning
-    let commits: Vec<_> = commits_raw.values().collect();
-    let chunk_size = (commits.len() + num_workers - 1) / num_workers;
+    let chunk_size = commit_work.len().div_ceil(num_workers);
 
     // Spawn worker threads
-    let workers: Vec<_> = commits
+    let workers: Vec<_> = commit_work
         .chunks(chunk_size)
         .enumerate()
-        .map(|(worker_id, commit_chunk)| {
+        .map(|(worker_id, chunk)| {
             let tx = tx.clone();
-            let trees_raw = Arc::clone(&trees_raw);
-            let hash_index_trees = Arc::clone(&hash_index_trees);
-
-            // Clone the commit data for this worker
-            let commits: Vec<CommitRaw> = commit_chunk
-                .iter()
-                .map(|c| CommitRaw {
-                    index: c.index,
-                    root_tree_hash: c.root_tree_hash,
-                    parent_hashes: c.parent_hashes.clone(),
-                })
-                .collect();
+            let context = Arc::clone(&context);
+            let chunk: Vec<_> = chunk.to_vec();
 
             thread::spawn(move || {
-                // Optionally pin to CPU core for cache locality
                 if let Some(core_ids) = core_affinity::get_core_ids() {
                     if worker_id < core_ids.len() {
                         core_affinity::set_for_current(core_ids[worker_id]);
                     }
                 }
 
-                worker_loop(commits, trees_raw, hash_index_trees, tx);
+                for (commit_idx, root_tree_hash, parent_hashes) in chunk {
+                    let result = diff_commit_tree(
+                        commit_idx,
+                        &root_tree_hash,
+                        &parent_hashes,
+                        &context,
+                    );
+
+                    if tx.send(result).is_err() {
+                        break;
+                    }
+                }
             })
         })
         .collect();
 
-    // Drop the sender in main thread so channel closes when workers finish
     drop(tx);
 
     // Main thread: merge results as they arrive
-    let mut processed = 0;
+    let mut processed = 0u64;
+    let mut total_trees = 0u64;
+    let mut total_blobs = 0u64;
+
     for result in rx {
+        total_trees += result.trees_visited.len() as u64;
+        total_blobs += result.blobs_visited.len() as u64;
         merge_walk_result(result, container);
         processed += 1;
         progress.set_position(processed);
+
+        if processed % 5000 == 0 {
+            let avg_trees = if processed > 0 { total_trees / processed } else { 0 };
+            let avg_blobs = if processed > 0 { total_blobs / processed } else { 0 };
+            progress.set_message(format!(
+                "avg: {}t/{}b per commit",
+                avg_trees, avg_blobs,
+            ));
+        }
     }
 
-    // Wait for all workers to complete
     for worker in workers {
         let _ = worker.join();
     }
 
-    progress.finish_with_message("Done");
+    progress.finish_with_message(format!(
+        "done - {} trees, {} blobs linked",
+        total_trees, total_blobs,
+    ));
+
     info!("Built relationships for {} commits", processed);
 
     Ok(())
 }
 
-/// Worker thread loop: walk commit trees and send results
-fn worker_loop(
-    commits: Vec<CommitRaw>,
-    trees_raw: Arc<HashMap<ObjectHash, TreeRaw>>,
-    hash_index_trees: Arc<HashMap<ObjectHash, usize>>,
-    tx: Sender<WalkResult>,
-) {
-    for commit in commits {
-        let result = walk_tree_pure(commit.index, &commit.root_tree_hash, &trees_raw, &hash_index_trees);
-
-        // If send fails, channel is closed, worker should exit
-        if tx.send(result).is_err() {
-            break;
-        }
-    }
-}
-
-/// Pure function to walk a commit's tree and collect visited objects
+/// Diff a commit's tree against its parent's tree to find changed objects
 ///
-/// This function has no side effects - it only reads from shared immutable data
-/// and returns a WalkResult containing the relationships discovered.
-fn walk_tree_pure(
+/// For root commits (no parents), walks the entire tree.
+/// For normal commits, only walks subtrees that differ from the first parent.
+fn diff_commit_tree(
     commit_idx: usize,
     root_tree_hash: &ObjectHash,
-    trees_raw: &HashMap<ObjectHash, TreeRaw>,
-    hash_index_trees: &HashMap<ObjectHash, usize>,
+    parent_hashes: &[ObjectHash],
+    context: &WorkerContext,
 ) -> WalkResult {
     let mut result = WalkResult::new(commit_idx);
 
-    // Start walking from the root tree
-    if let Some(tree_raw) = trees_raw.get(root_tree_hash) {
-        walk_recursive(tree_raw, "", trees_raw, hash_index_trees, &mut result);
-    }
+    let current_tree = match context.trees_raw.get(root_tree_hash) {
+        Some(t) => t,
+        None => return result,
+    };
+
+    // Get parent's root tree (if this commit has a parent)
+    let parent_tree = parent_hashes
+        .first()
+        .and_then(|parent_hash| context.commits_raw.get(parent_hash))
+        .and_then(|parent_commit| context.trees_raw.get(&parent_commit.root_tree_hash));
+
+    diff_trees(current_tree, parent_tree, "", &context.trees_raw, &mut result);
 
     result
 }
 
-/// Recursively walk a tree, collecting all trees and blobs visited
-fn walk_recursive(
-    tree: &TreeRaw,
+/// Recursively diff two trees and collect only changed/new entries
+///
+/// If parent_tree is None (root commit), all entries are considered new.
+/// Otherwise, only entries whose hash differs from the parent are walked.
+fn diff_trees(
+    current: &TreeRaw,
+    parent: Option<&TreeRaw>,
     path: &str,
     trees_raw: &HashMap<ObjectHash, TreeRaw>,
-    hash_index_trees: &HashMap<ObjectHash, usize>,
     result: &mut WalkResult,
 ) {
-    // Record this tree
-    result.trees_visited.push((tree.index, path.to_string()));
+    // Build a lookup of parent entries by name for fast comparison
+    let parent_entries: Option<HashMap<&str, &crate::models::container::TreeEntry>> =
+        parent.map(|p| p.entries.iter().map(|e| (e.name.as_str(), e)).collect());
 
-    // Process each entry in the tree
-    for entry in &tree.entries {
+    // Record this tree as visited
+    result.trees_visited.push((current.index, path.to_string()));
+
+    for entry in &current.entries {
+        // Check if this entry exists with the same hash in the parent
+        let is_unchanged = parent_entries
+            .as_ref()
+            .and_then(|pe| pe.get(entry.name.as_str()))
+            .is_some_and(|parent_entry| parent_entry.hash == entry.hash);
+
+        if is_unchanged {
+            continue; // Same hash = identical content, skip
+        }
+
         let child_path = if path.is_empty() {
             entry.name.clone()
         } else {
             format!("{}/{}", path, entry.name)
         };
 
-        if entry.is_tree {
-            // Recurse into subtree
-            // First try to find by resolved index, then by hash lookup
-            if let Some(subtree) = entry
-                .child_idx
-                .and_then(|_| trees_raw.get(&entry.hash))
-                .or_else(|| {
-                    hash_index_trees
-                        .get(&entry.hash)
-                        .and_then(|_| trees_raw.get(&entry.hash))
-                })
-            {
-                walk_recursive(subtree, &child_path, trees_raw, hash_index_trees, result);
+        if entry.kind.is_tree() {
+            // Subtree is new or changed - recurse with diff
+            if let Some(child_tree) = trees_raw.get(&entry.hash) {
+                // Find the parent's version of this subtree for narrower diff
+                let parent_subtree = parent_entries
+                    .as_ref()
+                    .and_then(|pe| pe.get(entry.name.as_str()))
+                    .filter(|pe| pe.kind.is_tree())
+                    .and_then(|pe| trees_raw.get(&pe.hash));
+
+                diff_trees(child_tree, parent_subtree, &child_path, trees_raw, result);
             }
         } else {
-            // Record blob (use resolved child_idx if available)
+            // Blob is new or changed
             if let Some(blob_idx) = entry.child_idx {
                 result.blobs_visited.push((blob_idx, child_path));
             }
@@ -186,15 +220,12 @@ fn walk_recursive(
 
 /// Merge a WalkResult into the ObjectContainer
 ///
-/// This runs on the main thread with exclusive access to the container,
-/// so no locks are needed.
+/// Runs on the main thread with exclusive access, no locks needed.
 fn merge_walk_result(result: WalkResult, container: &mut ObjectContainer) {
     let commit_idx = result.commit_idx;
 
-    // Get mutable reference to the commit
     let commit = &mut container.commits[commit_idx];
 
-    // Add tree relationships
     for (tree_idx, path) in result.trees_visited {
         commit.tree_deps.push(tree_idx);
 
@@ -203,7 +234,6 @@ fn merge_walk_result(result: WalkResult, container: &mut ObjectContainer) {
         tree.paths.insert(path);
     }
 
-    // Add blob relationships
     for (blob_idx, path) in result.blobs_visited {
         commit.blob_deps.push(blob_idx);
 
