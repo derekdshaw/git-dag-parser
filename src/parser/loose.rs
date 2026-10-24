@@ -7,8 +7,9 @@ use flate2::read::ZlibDecoder;
 use hashbrown::HashMap;
 use tracing::debug;
 
+use super::content::{hex_to_hash, parse_commit, parse_tree};
 use crate::error::ParseError;
-use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeEntry, TreeRaw};
+use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
 use crate::models::{Blob, Commit, ObjectContainer, Tag, Tree};
 
 /// Parse all loose objects in the objects directory
@@ -66,14 +67,10 @@ pub fn parse_loose_objects(
 
             // Construct the full hash
             let hash_hex = format!("{}{}", dir_name, obj_name);
-            let hash = hex_to_hash(&hash_hex)?;
+            let hash = hex_to_hash(hash_hex.as_bytes())?;
 
             // Skip if already indexed (from pack files)
-            if hash_index.commits.contains_key(&hash)
-                || hash_index.trees.contains_key(&hash)
-                || hash_index.blobs.contains_key(&hash)
-                || hash_index.tags.contains_key(&hash)
-            {
+            if hash_index.contains(&hash) {
                 continue;
             }
 
@@ -137,7 +134,7 @@ fn parse_loose_object(
             container.commits.push(Commit::new(index, size, file_size));
             hash_index.commits.insert(*hash, index);
 
-            let raw = parse_commit_content(content, index)?;
+            let raw = parse_commit(content, index)?;
             commits_raw.insert(*hash, raw);
         }
         "tree" => {
@@ -145,7 +142,7 @@ fn parse_loose_object(
             container.trees.push(Tree::new(index, size, file_size));
             hash_index.trees.insert(*hash, index);
 
-            let entries = parse_tree_content(content)?;
+            let entries = parse_tree(content)?;
             trees_raw.insert(*hash, TreeRaw { index, entries });
         }
         "blob" => {
@@ -176,86 +173,4 @@ fn parse_loose_object(
     }
 
     Ok(())
-}
-
-/// Parse commit content to extract tree and parent hashes
-fn parse_commit_content(data: &[u8], index: usize) -> Result<CommitRaw> {
-    let text = std::str::from_utf8(data)?;
-    let mut tree_hash = None;
-    let mut parent_hashes = Vec::new();
-
-    for line in text.lines() {
-        if line.is_empty() {
-            break;
-        }
-
-        if let Some(hash_str) = line.strip_prefix("tree ") {
-            tree_hash = Some(hex_to_hash(hash_str)?);
-        } else if let Some(hash_str) = line.strip_prefix("parent ") {
-            parent_hashes.push(hex_to_hash(hash_str)?);
-        }
-    }
-
-    Ok(CommitRaw {
-        index,
-        root_tree_hash: tree_hash
-            .ok_or_else(|| ParseError::InvalidObjectFormat("commit missing tree".into()))?,
-        parent_hashes,
-    })
-}
-
-/// Parse tree content to extract entries
-fn parse_tree_content(data: &[u8]) -> Result<Vec<TreeEntry>> {
-    let mut entries = Vec::new();
-    let mut pos = 0;
-
-    while pos < data.len() {
-        // Parse mode
-        let space_pos = data[pos..]
-            .iter()
-            .position(|&b| b == b' ')
-            .ok_or_else(|| ParseError::InvalidObjectFormat("tree entry missing space".into()))?;
-
-        let mode_str = std::str::from_utf8(&data[pos..pos + space_pos])?;
-        let mode = u32::from_str_radix(mode_str, 8)
-            .map_err(|_| ParseError::InvalidObjectFormat("invalid mode".into()))?;
-        pos += space_pos + 1;
-
-        // Parse name
-        let null_pos = data[pos..]
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or_else(|| ParseError::InvalidObjectFormat("tree entry missing null".into()))?;
-
-        let name = std::str::from_utf8(&data[pos..pos + null_pos])?.to_string();
-        pos += null_pos + 1;
-
-        // Parse hash
-        if pos + 20 > data.len() {
-            return Err(ParseError::InvalidObjectFormat("tree entry truncated".into()).into());
-        }
-
-        let hash: ObjectHash = data[pos..pos + 20].try_into()?;
-        pos += 20;
-
-        entries.push(TreeEntry::new(mode, name, hash));
-    }
-
-    Ok(entries)
-}
-
-/// Convert hex string to hash bytes
-fn hex_to_hash(hex: &str) -> Result<ObjectHash> {
-    if hex.len() != 40 {
-        return Err(ParseError::InvalidObjectFormat("invalid hash length".into()).into());
-    }
-
-    let mut hash = [0u8; 20];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let s = std::str::from_utf8(chunk)?;
-        hash[i] = u8::from_str_radix(s, 16)
-            .map_err(|_| ParseError::InvalidObjectFormat("invalid hex".into()))?;
-    }
-
-    Ok(hash)
 }

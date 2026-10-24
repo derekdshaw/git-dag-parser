@@ -7,10 +7,11 @@ use anyhow::{anyhow, Context, Result};
 use flate2::read::ZlibDecoder;
 use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressStyle};
-use tracing::{debug, warn};
+use tracing::debug;
 
+use super::content::{parse_commit, parse_tree};
 use crate::error::ParseError;
-use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeEntry, TreeRaw};
+use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
 use crate::models::{Blob, Commit, ObjectContainer, Tag, Tree};
 
 /// Object type constants from Git pack format
@@ -184,13 +185,17 @@ fn parse_pack_file(
             .progress_chars("#>-"),
     );
 
+    // The pack trailer is a SHA-1 checksum of everything before it.
+    let pack_end = (pack_mmap.len() - 20) as u64;
+    let offsets: Vec<u64> = index.entries.iter().map(|e| e.offset).collect();
+    let disk_sizes = disk_sizes(&offsets, pack_end);
+
     let mut parsed = 0u64;
-    let mut errors = 0u64;
     let mut skipped_blobs = 0u64;
     let mut type_counts: [u64; 8] = [0; 8];
 
     // Parse each object in the pack
-    for entry in &index.entries {
+    for (entry, &size_disk) in index.entries.iter().zip(&disk_sizes) {
         // Count raw object type (cheap - just read the header byte)
         let offset = entry.offset as usize;
         if offset < pack_mmap.len() {
@@ -198,11 +203,13 @@ fn parse_pack_file(
             type_counts[raw_type as usize] += 1;
         }
 
-        let result = parse_pack_object(
+        // A failed object would silently drop every edge below it, so stop.
+        parse_pack_object(
             &pack_mmap,
             &index,
             &hash_to_offset,
             entry,
+            size_disk as u32,
             &mut delta_arena,
             &mut delta_cache,
             commits_raw,
@@ -210,48 +217,32 @@ fn parse_pack_file(
             hash_index,
             container,
             &mut skipped_blobs,
-        );
-
-        match result {
-            Ok(()) => parsed += 1,
-            Err(e) => {
-                errors += 1;
-                if errors <= 10 {
-                    warn!(
-                        "Failed to parse object {}: {}",
-                        hex::encode(entry.hash),
-                        e
-                    );
-                } else if errors == 11 {
-                    warn!("Suppressing further parse errors...");
-                }
-            }
-        }
+        )
+        .with_context(|| format!("Failed to parse object {}", hex::encode(entry.hash)))?;
+        parsed += 1;
 
         progress.inc(1);
 
         // Update message periodically
         if parsed % 10000 == 0 {
             progress.set_message(format!(
-                "C:{} T:{} B:{} t:{} err:{}",
+                "C:{} T:{} B:{} t:{}",
                 container.commits.len(),
                 container.trees.len(),
                 container.blobs.len(),
                 container.tags.len(),
-                errors,
             ));
         }
     }
 
     progress.finish_with_message(format!(
-        "done - C:{} T:{} B:{} t:{} delta-cache:{} blob-skip:{} err:{}",
+        "done - C:{} T:{} B:{} t:{} delta-cache:{} blob-skip:{}",
         container.commits.len(),
         container.trees.len(),
         container.blobs.len(),
         container.tags.len(),
         delta_cache.len(),
         skipped_blobs,
-        errors,
     ));
 
     // Print type breakdown
@@ -296,6 +287,7 @@ fn parse_pack_object(
     index: &PackIndex,
     hash_to_offset: &HashMap<ObjectHash, u64>,
     entry: &PackIndexEntry,
+    size_disk: u32,
     delta_arena: &mut DeltaArena,
     delta_cache: &mut HashMap<u64, DeltaCacheEntry>,
     commits_raw: &mut HashMap<ObjectHash, CommitRaw>,
@@ -304,93 +296,68 @@ fn parse_pack_object(
     container: &mut ObjectContainer,
     skipped_blobs: &mut u64,
 ) -> Result<()> {
+    // Packs can overlap; the first copy parsed is the one recorded.
+    if hash_index.contains(&entry.hash) {
+        return Ok(());
+    }
+
     let offset = entry.offset as usize;
     let (obj_type, obj_size, header_len) = parse_object_header(&pack_data[offset..])?;
 
     let data_start = offset + header_len;
 
-    // For non-delta blobs, we can skip decompression entirely
-    // We only need the type and size
-    if obj_type == OBJ_BLOB {
-        let index_val = container.blobs.len();
-        container.blobs.push(Blob::new(index_val, obj_size as u32, 0));
-        hash_index.blobs.insert(entry.hash, index_val);
-        *skipped_blobs += 1;
-        return Ok(());
-    }
-
-    // Handle delta objects
-    let (final_type, obj_data) = match obj_type {
-        OBJ_OFS_DELTA => {
-            let (base_offset_relative, delta_header_len) =
-                parse_ofs_delta_header(&pack_data[data_start..])?;
-            let abs_base_offset = offset - base_offset_relative;
-            let delta_data = decompress_data(&pack_data[data_start + delta_header_len..])?;
-            let base_data = resolve_object_at_offset(
-                pack_data,
-                index,
-                hash_to_offset,
-                abs_base_offset as u64,
-                delta_arena,
-                delta_cache,
-                0,
-            )?;
-
-            // Cache this resolved base if it was expensive to compute
-            if !delta_cache.contains_key(&(abs_base_offset as u64)) {
-                let (blk, off, len) = delta_arena.store(&base_data.1);
-                delta_cache.insert(abs_base_offset as u64, (base_data.0, blk, off, len));
-            }
-
-            let resolved = apply_delta(&base_data.1, &delta_data)?;
-            (base_data.0, resolved)
-        }
-        OBJ_REF_DELTA => {
-            let base_hash: ObjectHash = pack_data[data_start..data_start + 20].try_into()?;
-            let delta_data = decompress_data(&pack_data[data_start + 20..])?;
-
-            // Use hash lookup instead of linear scan
-            let base_offset = hash_to_offset
-                .get(&base_hash)
-                .ok_or_else(|| ParseError::ObjectNotFound(hex::encode(base_hash)))?;
-
-            let base_data = resolve_object_at_offset(
-                pack_data,
-                index,
-                hash_to_offset,
-                *base_offset,
-                delta_arena,
-                delta_cache,
-                0,
-            )?;
-
-            if !delta_cache.contains_key(base_offset) {
-                let (blk, off, len) = delta_arena.store(&base_data.1);
-                delta_cache.insert(*base_offset, (base_data.0, blk, off, len));
-            }
-
-            let resolved = apply_delta(&base_data.1, &delta_data)?;
-            (base_data.0, resolved)
-        }
-        _ => {
-            let obj_data = decompress_data(&pack_data[data_start..])?;
-            (obj_type, obj_data)
-        }
+    let delta = match obj_type {
+        OBJ_OFS_DELTA | OBJ_REF_DELTA => Some(delta_base(
+            pack_data,
+            hash_to_offset,
+            offset,
+            obj_type,
+            data_start,
+        )?),
+        _ => None,
     };
 
-    // For delta-resolved blobs, still skip storing content
+    // A delta's header size is the size of the delta, not of the object. The
+    // object's size is in the delta's own header, and its type is the type
+    // at the end of the base chain.
+    let (final_type, size) = match delta {
+        Some((base_offset, payload_start)) => (
+            resolved_type(pack_data, hash_to_offset, base_offset)?,
+            delta_result_size(&pack_data[payload_start..])?,
+        ),
+        None => (obj_type, obj_size),
+    };
+
+    // Blob content is never needed, so blobs are never inflated
     if final_type == OBJ_BLOB {
         let index_val = container.blobs.len();
-        container.blobs.push(Blob::new(index_val, obj_size as u32, 0));
+        container.blobs.push(Blob::new(index_val, size as u32, size_disk));
         hash_index.blobs.insert(entry.hash, index_val);
         *skipped_blobs += 1;
         return Ok(());
     }
+
+    let obj_data = match delta {
+        Some((base_offset, payload_start)) => {
+            let delta_data = decompress_data(&pack_data[payload_start..])?;
+            let (_, base_data) = resolve_object_at_offset(
+                pack_data,
+                index,
+                hash_to_offset,
+                base_offset as u64,
+                delta_arena,
+                delta_cache,
+                0,
+            )?;
+            apply_delta(&base_data, &delta_data)?
+        }
+        None => decompress_data(&pack_data[data_start..])?,
+    };
 
     store_object(
         final_type,
-        obj_size as u32,
-        0,
+        size as u32,
+        size_disk,
         &obj_data,
         &entry.hash,
         commits_raw,
@@ -398,6 +365,89 @@ fn parse_pack_object(
         hash_index,
         container,
     )
+}
+
+/// Locate a delta's base object and the start of its zlib-compressed payload
+fn delta_base(
+    pack_data: &[u8],
+    hash_to_offset: &HashMap<ObjectHash, u64>,
+    offset: usize,
+    obj_type: u8,
+    data_start: usize,
+) -> Result<(usize, usize)> {
+    if obj_type == OBJ_OFS_DELTA {
+        let (relative, header_len) = parse_ofs_delta_header(&pack_data[data_start..])?;
+        Ok((offset - relative, data_start + header_len))
+    } else {
+        let base_hash: ObjectHash = pack_data[data_start..data_start + 20].try_into()?;
+        let base_offset = hash_to_offset
+            .get(&base_hash)
+            .ok_or_else(|| ParseError::ObjectNotFound(hex::encode(base_hash)))?;
+        Ok((*base_offset as usize, data_start + 20))
+    }
+}
+
+/// Type of the object at the end of a delta chain, found by following base
+/// pointers through object headers without inflating anything
+fn resolved_type(
+    pack_data: &[u8],
+    hash_to_offset: &HashMap<ObjectHash, u64>,
+    mut offset: usize,
+) -> Result<u8> {
+    for _ in 0..=MAX_DELTA_DEPTH {
+        let (obj_type, _, header_len) = parse_object_header(&pack_data[offset..])?;
+        if obj_type != OBJ_OFS_DELTA && obj_type != OBJ_REF_DELTA {
+            return Ok(obj_type);
+        }
+        (offset, _) = delta_base(
+            pack_data,
+            hash_to_offset,
+            offset,
+            obj_type,
+            offset + header_len,
+        )?;
+    }
+    Err(anyhow!(
+        "Delta chain too deep (>{}) at offset {}",
+        MAX_DELTA_DEPTH,
+        offset
+    ))
+}
+
+/// Size of the object a delta produces: the second varint of the delta,
+/// after the base size. Only the first few bytes are inflated.
+fn delta_result_size(compressed: &[u8]) -> Result<u64> {
+    // Two varints of at most 10 bytes each
+    let mut prefix = [0u8; 20];
+    let mut decoder = ZlibDecoder::new(compressed);
+    let mut len = 0;
+    while len < prefix.len() {
+        let n = decoder
+            .read(&mut prefix[len..])
+            .map_err(|e| ParseError::DecompressionError(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        len += n;
+    }
+
+    let (_, base_len) = read_varint(&prefix[..len])?;
+    let (size, _) = read_varint(&prefix[base_len..len])?;
+    Ok(size)
+}
+
+/// On-disk size of each object: the distance from its offset to the next
+/// object's offset, or to `pack_end` for the last one
+fn disk_sizes(offsets: &[u64], pack_end: u64) -> Vec<u64> {
+    let mut sorted = offsets.to_vec();
+    sorted.sort_unstable();
+    offsets
+        .iter()
+        .map(|&offset| {
+            let next = sorted.partition_point(|&o| o <= offset);
+            sorted.get(next).copied().unwrap_or(pack_end) - offset
+        })
+        .collect()
 }
 
 /// Parse the variable-length object header
@@ -655,7 +705,7 @@ fn store_object(
             container.commits.push(Commit::new(index, size, size_disk));
             hash_index.commits.insert(*hash, index);
 
-            let raw = parse_commit_content(data, index)?;
+            let raw = parse_commit(data, index)?;
             commits_raw.insert(*hash, raw);
         }
         OBJ_TREE => {
@@ -663,7 +713,7 @@ fn store_object(
             container.trees.push(Tree::new(index, size, size_disk));
             hash_index.trees.insert(*hash, index);
 
-            let entries = parse_tree_content(data)?;
+            let entries = parse_tree(data)?;
             trees_raw.insert(*hash, TreeRaw { index, entries });
         }
         OBJ_BLOB => {
@@ -693,85 +743,6 @@ fn store_object(
     }
 
     Ok(())
-}
-
-/// Parse commit content to extract tree and parent hashes
-fn parse_commit_content(data: &[u8], index: usize) -> Result<CommitRaw> {
-    let text = std::str::from_utf8(data)?;
-    let mut tree_hash = None;
-    let mut parent_hashes = Vec::new();
-
-    for line in text.lines() {
-        if line.is_empty() {
-            break;
-        }
-
-        if let Some(hash_str) = line.strip_prefix("tree ") {
-            tree_hash = Some(hex_to_hash(hash_str)?);
-        } else if let Some(hash_str) = line.strip_prefix("parent ") {
-            parent_hashes.push(hex_to_hash(hash_str)?);
-        }
-    }
-
-    Ok(CommitRaw {
-        index,
-        root_tree_hash: tree_hash
-            .ok_or_else(|| ParseError::InvalidObjectFormat("commit missing tree".into()))?,
-        parent_hashes,
-    })
-}
-
-/// Parse tree content to extract entries
-fn parse_tree_content(data: &[u8]) -> Result<Vec<TreeEntry>> {
-    let mut entries = Vec::new();
-    let mut pos = 0;
-
-    while pos < data.len() {
-        let space_pos = data[pos..]
-            .iter()
-            .position(|&b| b == b' ')
-            .ok_or_else(|| ParseError::InvalidObjectFormat("tree entry missing space".into()))?;
-
-        let mode_str = std::str::from_utf8(&data[pos..pos + space_pos])?;
-        let mode = u32::from_str_radix(mode_str, 8)
-            .map_err(|_| ParseError::InvalidObjectFormat("invalid mode".into()))?;
-        pos += space_pos + 1;
-
-        let null_pos = data[pos..]
-            .iter()
-            .position(|&b| b == 0)
-            .ok_or_else(|| ParseError::InvalidObjectFormat("tree entry missing null".into()))?;
-
-        let name = std::str::from_utf8(&data[pos..pos + null_pos])?.to_string();
-        pos += null_pos + 1;
-
-        if pos + 20 > data.len() {
-            return Err(ParseError::InvalidObjectFormat("tree entry truncated".into()).into());
-        }
-
-        let hash: ObjectHash = data[pos..pos + 20].try_into()?;
-        pos += 20;
-
-        entries.push(TreeEntry::new(mode, name, hash));
-    }
-
-    Ok(entries)
-}
-
-/// Convert a hex string to a hash
-fn hex_to_hash(hex: &str) -> Result<ObjectHash> {
-    if hex.len() != 40 {
-        return Err(ParseError::InvalidObjectFormat("invalid hash length".into()).into());
-    }
-
-    let mut hash = [0u8; 20];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let s = std::str::from_utf8(chunk)?;
-        hash[i] = u8::from_str_radix(s, 16)
-            .map_err(|_| ParseError::InvalidObjectFormat("invalid hex".into()))?;
-    }
-
-    Ok(hash)
 }
 
 /// Pack index structure
@@ -879,5 +850,40 @@ mod hex {
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+
+    use super::*;
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn disk_sizes_measure_to_next_offset_in_pack_order() {
+        // Index entries are in hash order, not offset order.
+        assert_eq!(disk_sizes(&[100, 12, 40], 150), vec![50, 28, 60]);
+    }
+
+    #[test]
+    fn read_varint_reads_multi_byte_values() {
+        // 300 = 0b10_0101100, low 7 bits first
+        assert_eq!(read_varint(&[0xac, 0x02, 0xff]).unwrap(), (300, 2));
+    }
+
+    #[test]
+    fn delta_result_size_reads_second_varint() {
+        // Base size 5, result size 300, then a one-byte insert instruction
+        let delta = [0x05, 0xac, 0x02, 0x01, b'x'];
+        assert_eq!(delta_result_size(&zlib(&delta)).unwrap(), 300);
     }
 }

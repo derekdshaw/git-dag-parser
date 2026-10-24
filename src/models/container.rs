@@ -60,6 +60,14 @@ impl HashIndex {
             tags: HashMap::with_capacity(tags),
         }
     }
+
+    /// True if an object with this hash is indexed under any type
+    pub fn contains(&self, hash: &ObjectHash) -> bool {
+        self.commits.contains_key(hash)
+            || self.trees.contains_key(hash)
+            || self.blobs.contains_key(hash)
+            || self.tags.contains_key(hash)
+    }
 }
 
 /// Raw commit data extracted during Phase 1 parsing
@@ -143,8 +151,9 @@ impl FileKind {
 /// A single entry in a tree object
 #[derive(Debug, Clone)]
 pub struct TreeEntry {
-    /// Entry name (filename or directory name)
-    pub name: String,
+    /// Entry name (filename or directory name), as raw bytes since git
+    /// does not require names to be UTF-8
+    pub name: Vec<u8>,
     /// Hash of the referenced object (blob or subtree)
     pub hash: ObjectHash,
     /// Resolved index of the child object (set after all objects are indexed)
@@ -155,7 +164,7 @@ pub struct TreeEntry {
 
 impl TreeEntry {
     /// Create a new tree entry
-    pub fn new(mode: u32, name: String, hash: ObjectHash) -> Self {
+    pub fn new(mode: u32, name: Vec<u8>, hash: ObjectHash) -> Self {
         let kind = FileKind::from_mode(mode).unwrap_or(FileKind::Regular);
         Self {
             name,
@@ -184,5 +193,21 @@ impl WalkResult {
             trees_visited: Vec::new(),
             blobs_visited: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_index_contains_finds_any_type() {
+        let mut index = HashIndex::new();
+        index.trees.insert([1; 20], 0);
+        index.tags.insert([2; 20], 0);
+
+        assert!(index.contains(&[1; 20]));
+        assert!(index.contains(&[2; 20]));
+        assert!(!index.contains(&[3; 20]));
     }
 }

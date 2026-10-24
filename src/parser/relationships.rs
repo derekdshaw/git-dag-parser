@@ -174,8 +174,8 @@ fn diff_trees(
     result: &mut WalkResult,
 ) {
     // Build a lookup of parent entries by name for fast comparison
-    let parent_entries: Option<HashMap<&str, &crate::models::container::TreeEntry>> =
-        parent.map(|p| p.entries.iter().map(|e| (e.name.as_str(), e)).collect());
+    let parent_entries: Option<HashMap<&[u8], &crate::models::container::TreeEntry>> =
+        parent.map(|p| p.entries.iter().map(|e| (e.name.as_slice(), e)).collect());
 
     // Record this tree as visited
     result.trees_visited.push((current.index, path.to_string()));
@@ -184,17 +184,19 @@ fn diff_trees(
         // Check if this entry exists with the same hash in the parent
         let is_unchanged = parent_entries
             .as_ref()
-            .and_then(|pe| pe.get(entry.name.as_str()))
+            .and_then(|pe| pe.get(entry.name.as_slice()))
             .is_some_and(|parent_entry| parent_entry.hash == entry.hash);
 
         if is_unchanged {
             continue; // Same hash = identical content, skip
         }
 
+        // Paths stay String until path interning; non-UTF-8 names are lossy here.
+        let name = String::from_utf8_lossy(&entry.name);
         let child_path = if path.is_empty() {
-            entry.name.clone()
+            name.into_owned()
         } else {
-            format!("{}/{}", path, entry.name)
+            format!("{}/{}", path, name)
         };
 
         if entry.kind.is_tree() {
@@ -203,7 +205,7 @@ fn diff_trees(
                 // Find the parent's version of this subtree for narrower diff
                 let parent_subtree = parent_entries
                     .as_ref()
-                    .and_then(|pe| pe.get(entry.name.as_str()))
+                    .and_then(|pe| pe.get(entry.name.as_slice()))
                     .filter(|pe| pe.kind.is_tree())
                     .and_then(|pe| trees_raw.get(&pe.hash));
 
