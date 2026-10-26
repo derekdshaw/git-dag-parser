@@ -7,7 +7,7 @@ use flate2::read::ZlibDecoder;
 use hashbrown::HashMap;
 use tracing::debug;
 
-use super::content::{hex_to_hash, parse_commit, parse_tree};
+use super::content::{hex_to_hash, parse_commit, parse_tag, parse_tree};
 use crate::error::ParseError;
 use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
 use crate::models::{Blob, Commit, ObjectContainer, Tag, Tree};
@@ -100,7 +100,7 @@ fn parse_loose_object(
 ) -> Result<()> {
     // Read and decompress the file
     let file = File::open(path).context("Failed to open loose object")?;
-    let file_size = file.metadata()?.len() as u32;
+    let file_size = file.metadata()?.len();
     let mut decoder = ZlibDecoder::new(file);
     let mut data = Vec::new();
     decoder
@@ -120,7 +120,7 @@ fn parse_loose_object(
         .next()
         .ok_or_else(|| ParseError::InvalidObjectFormat("missing type".into()))?;
 
-    let size: u32 = parts
+    let size: u64 = parts
         .next()
         .ok_or_else(|| ParseError::InvalidObjectFormat("missing size".into()))?
         .parse()
@@ -131,7 +131,9 @@ fn parse_loose_object(
     match obj_type {
         "commit" => {
             let index = container.commits.len();
-            container.commits.push(Commit::new(index, size, file_size));
+            container
+                .commits
+                .push(Commit::new(index, *hash, size, file_size));
             hash_index.commits.insert(*hash, index);
 
             let raw = parse_commit(content, index)?;
@@ -139,7 +141,9 @@ fn parse_loose_object(
         }
         "tree" => {
             let index = container.trees.len();
-            container.trees.push(Tree::new(index, size, file_size));
+            container
+                .trees
+                .push(Tree::new(index, *hash, size, file_size));
             hash_index.trees.insert(*hash, index);
 
             let entries = parse_tree(content)?;
@@ -147,24 +151,17 @@ fn parse_loose_object(
         }
         "blob" => {
             let index = container.blobs.len();
-            container.blobs.push(Blob::new(index, size, file_size));
+            container
+                .blobs
+                .push(Blob::new(index, *hash, size, file_size));
             hash_index.blobs.insert(*hash, index);
         }
         "tag" => {
             let index = container.tags.len();
-            let mut tag = Tag::new(index, size, file_size);
-
-            // Parse tag name
-            if let Ok(text) = std::str::from_utf8(content) {
-                for line in text.lines() {
-                    if let Some(name) = line.strip_prefix("tag ") {
-                        tag.name = Some(name.to_string());
-                        break;
-                    }
-                }
-            }
-
-            container.tags.push(tag);
+            let raw = parse_tag(content)?;
+            container
+                .tags
+                .push(Tag::new(index, *hash, size, file_size, raw.name, raw.target));
             hash_index.tags.insert(*hash, index);
         }
         _ => {

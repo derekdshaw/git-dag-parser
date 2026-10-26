@@ -1,6 +1,7 @@
 mod content;
 mod loose;
 mod pack;
+mod refs;
 mod relationships;
 
 use std::path::Path;
@@ -10,7 +11,7 @@ use anyhow::Result;
 use hashbrown::HashMap;
 
 use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
-use crate::models::ObjectContainer;
+use crate::models::{ObjectContainer, Ref};
 
 pub use relationships::build_relationships;
 
@@ -20,7 +21,8 @@ pub use relationships::build_relationships;
 /// - Raw commit data (for tree walking in Phase 2)
 /// - Raw tree data (for tree walking in Phase 2)
 /// - Hash index (for resolving hashes to indices)
-/// - Object container (with empty relationship vectors)
+/// - Object container (with empty relationship vectors), with commit trees
+///   and parents, tag targets and refs resolved to indices
 ///
 /// Static relationships (tree→blob, tree→subtree, blob→tree) are also
 /// built during this phase since they're inherent to the tree structure.
@@ -66,6 +68,14 @@ pub fn parse_objects(
     resolve_tree_entries(&mut trees_raw, &hash_index);
     println!("Resolved tree entry indices in {:?}", resolve_start.elapsed());
 
+    resolve_commits(&commits_raw, &hash_index, &mut container);
+    resolve_tags(&hash_index, &mut container);
+    for (name, target_hash) in refs::read_refs(git_dir)? {
+        let mut r = Ref::new(name, target_hash);
+        r.target = hash_index.get(&target_hash);
+        container.refs.push(r);
+    }
+
     // Build static tree↔blob relationships
     let static_start = Instant::now();
     build_static_relationships(&trees_raw, &mut container);
@@ -86,6 +96,32 @@ fn resolve_tree_entries(trees_raw: &mut HashMap<ObjectHash, TreeRaw>, hash_index
                 None // Submodules reference external commits
             };
         }
+    }
+}
+
+/// Resolve each commit's root tree and parents to indices
+fn resolve_commits(
+    commits_raw: &HashMap<ObjectHash, CommitRaw>,
+    hash_index: &HashIndex,
+    container: &mut ObjectContainer,
+) {
+    for raw in commits_raw.values() {
+        let commit = &mut container.commits[raw.index];
+        commit.tree = hash_index.trees.get(&raw.root_tree_hash).copied();
+        commit.parents = raw
+            .parent_hashes
+            .iter()
+            .filter_map(|hash| hash_index.commits.get(hash).copied())
+            .collect();
+        commit.boundary = commit.parents.len() < raw.parent_hashes.len();
+        commit.commit_time = raw.commit_time;
+    }
+}
+
+/// Resolve each annotated tag's target to an object id
+fn resolve_tags(hash_index: &HashIndex, container: &mut ObjectContainer) {
+    for tag in &mut container.tags {
+        tag.target = hash_index.get(&tag.target_hash);
     }
 }
 

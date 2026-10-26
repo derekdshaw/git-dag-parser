@@ -13,10 +13,10 @@ fn every_object_matches_git_type_and_sizes() {
         "fixture must contain deltified objects for this test to mean anything"
     );
 
-    let (_, _, hash_index, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     let expected = repo.git_objects();
-    let actual = parsed_objects(&hash_index, &container);
+    let actual = parsed_objects(&container);
     let mut mismatches: Vec<String> = expected
         .iter()
         .filter(|(hash, want)| actual.get(*hash) != Some(*want))
@@ -68,4 +68,24 @@ fn non_utf8_names_and_messages_are_parsed() {
         container.trees.len(),
         "every tree should have its entries parsed"
     );
+}
+
+#[test]
+fn hash_index_points_at_each_object() {
+    let repo = Repo::with_history();
+
+    let (_, _, hash_index, container) = parse_objects(&repo.git_dir()).unwrap();
+
+    for c in &container.commits {
+        assert_eq!(hash_index.commits.get(&c.hash), Some(&c.index));
+    }
+    for t in &container.trees {
+        assert_eq!(hash_index.trees.get(&t.hash), Some(&t.index));
+    }
+    for b in &container.blobs {
+        assert_eq!(hash_index.blobs.get(&b.hash), Some(&b.index));
+    }
+    for t in &container.tags {
+        assert_eq!(hash_index.tags.get(&t.hash), Some(&t.index));
+    }
 }

@@ -4,6 +4,7 @@
 // Each test binary uses a different subset of these helpers.
 #![allow(dead_code)]
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -11,7 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use git_dag_parser::models::container::{HashIndex, ObjectHash};
+use git_dag_parser::models::container::ObjectHash;
 use git_dag_parser::models::ObjectContainer;
 use tempfile::TempDir;
 
@@ -23,10 +24,20 @@ pub struct ObjectInfo {
     pub size_disk: u64,
 }
 
+/// Fields of one commit as git reports them, with hashes in hex
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    pub tree: Option<String>,
+    pub parents: Vec<String>,
+    pub commit_time: i64,
+}
+
 pub struct Repo {
     _tmp: TempDir,
     pub work: PathBuf,
     msg_file: PathBuf,
+    /// Advanced on every git call so each commit gets its own timestamps
+    clock: Cell<i64>,
 }
 
 impl Repo {
@@ -40,6 +51,7 @@ impl Repo {
             _tmp: tmp,
             work,
             msg_file,
+            clock: Cell::new(1_700_000_000),
         };
         repo.git(&["init", "-q", "-b", "main"]);
         repo
@@ -100,18 +112,59 @@ impl Repo {
         repo
     }
 
+    /// Merged history, unreachable and multi-parent commits, and every kind
+    /// of ref, with refs split between packed-refs and loose files.
+    pub fn with_refs_and_merges() -> Self {
+        let repo = Self::new();
+        repo.write("a.txt", "1\n");
+        repo.commit("base");
+        repo.git(&["checkout", "-q", "-b", "feature"]);
+        repo.write("b.txt", "feature\n");
+        repo.commit("feature work");
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("a.txt", "2\n");
+        repo.commit("main work");
+        repo.git(&["merge", "-q", "--no-ff", "-m", "merge feature", "feature"]);
+
+        repo.git(&["tag", "light"]);
+        repo.git(&["tag", "-a", "v1", "-m", "release v1"]);
+        repo.git(&["tag", "-a", "tree-tag", "-m", "tag of a tree", "HEAD^{tree}"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        repo.git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+        repo.git(&["pack-refs", "--all"]);
+        repo.git(&["repack", "-a", "-d", "-q"]);
+
+        // packed-refs now holds a stale main; the loose ref must win.
+        repo.write("a.txt", "3\n");
+        repo.commit("after pack-refs");
+        // The commit being amended stays in the store, unreachable from refs.
+        repo.git(&["commit", "-q", "--amend", "-m", "amended"]);
+        // A stash is a commit with two or three parents.
+        repo.write("a.txt", "dirty\n");
+        repo.git(&["stash", "-q"]);
+        repo
+    }
+
     pub fn git_dir(&self) -> PathBuf {
         self.work.join(".git")
     }
 
     /// Run git in the work tree with a hermetic config. Panics on failure.
     pub fn git(&self, args: &[&str]) -> Vec<u8> {
+        let now = self.clock.get() + 100;
+        self.clock.set(now);
+        // Author time differs from committer time so a parser reading the
+        // wrong one is caught.
         let out = Command::new("git")
             .current_dir(&self.work)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00Z")
-            .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00Z")
+            .env("GIT_AUTHOR_DATE", format!("@{} +0000", now - 30))
+            .env("GIT_COMMITTER_DATE", format!("@{now} +0000"))
             .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
             .args(["-c", "gc.auto=0", "-c", "commit.gpgsign=false"])
             .args(args)
@@ -161,6 +214,79 @@ impl Repo {
             .collect()
     }
 
+    /// Tree, parents and committer time of every commit in the store,
+    /// including ones no ref reaches
+    pub fn git_commits(&self) -> HashMap<String, CommitInfo> {
+        let mut args = vec![
+            "--no-replace-objects",
+            "log",
+            "--no-walk=unsorted",
+            "--format=%H %T %ct %P",
+        ];
+        let objects = self.git_objects();
+        args.extend(
+            objects
+                .iter()
+                .filter(|(_, info)| info.kind == "commit")
+                .map(|(hash, _)| hash.as_str()),
+        );
+        String::from_utf8(self.git(&args))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                let info = CommitInfo {
+                    tree: Some(f[1].to_string()),
+                    parents: f[3..].iter().map(|p| p.to_string()).collect(),
+                    commit_time: f[2].parse().unwrap(),
+                };
+                (f[0].to_string(), info)
+            })
+            .collect()
+    }
+
+    /// Number of commits reachable from any ref
+    pub fn reachable_commit_count(&self) -> usize {
+        let out = self.git(&["rev-list", "--all", "--count"]);
+        String::from_utf8(out).unwrap().trim().parse().unwrap()
+    }
+
+    /// Name and target hash of every annotated tag object, keyed by tag hash
+    pub fn git_tags(&self) -> HashMap<String, (String, String)> {
+        self.git_objects()
+            .into_iter()
+            .filter(|(_, info)| info.kind == "tag")
+            .map(|(hash, _)| {
+                let body = String::from_utf8(self.git(&["cat-file", "tag", &hash])).unwrap();
+                let header = |key: &str| {
+                    body.lines()
+                        .find_map(|l| l.strip_prefix(key))
+                        .unwrap()
+                        .to_string()
+                };
+                let fields = (header("tag "), header("object "));
+                (hash, fields)
+            })
+            .collect()
+    }
+
+    /// Target hash of every direct ref, keyed by name. Symbolic refs and
+    /// HEAD are left out, as `for-each-ref` reports them.
+    pub fn git_refs(&self) -> HashMap<String, String> {
+        let out = self.git(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname) %(symref)",
+        ]);
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                (f.len() == 2).then(|| (f[0].to_string(), f[1].to_string()))
+            })
+            .collect()
+    }
+
     pub fn pack_count(&self) -> usize {
         self.pack_files("pack").len()
     }
@@ -197,30 +323,26 @@ pub fn hex(hash: &ObjectHash) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The parser's view of every object, keyed by hex hash, in the same shape
-/// as `Repo::git_objects`.
-pub fn parsed_objects(index: &HashIndex, container: &ObjectContainer) -> HashMap<String, ObjectInfo> {
-    let info = |kind: &str, size: u32, size_disk: u32| ObjectInfo {
+/// The parser's view of every object, keyed by each object's own hash, in
+/// the same shape as `Repo::git_objects`.
+pub fn parsed_objects(container: &ObjectContainer) -> HashMap<String, ObjectInfo> {
+    let info = |kind: &str, size: u64, size_disk: u64| ObjectInfo {
         kind: kind.to_string(),
-        size: size.into(),
-        size_disk: size_disk.into(),
+        size,
+        size_disk,
     };
     let mut objects = HashMap::new();
-    for (hash, &i) in &index.commits {
-        let c = &container.commits[i];
-        objects.insert(hex(hash), info("commit", c.size, c.size_disk));
+    for c in &container.commits {
+        objects.insert(hex(&c.hash), info("commit", c.size, c.size_disk));
     }
-    for (hash, &i) in &index.trees {
-        let t = &container.trees[i];
-        objects.insert(hex(hash), info("tree", t.size, t.size_disk));
+    for t in &container.trees {
+        objects.insert(hex(&t.hash), info("tree", t.size, t.size_disk));
     }
-    for (hash, &i) in &index.blobs {
-        let b = &container.blobs[i];
-        objects.insert(hex(hash), info("blob", b.size, b.size_disk));
+    for b in &container.blobs {
+        objects.insert(hex(&b.hash), info("blob", b.size, b.size_disk));
     }
-    for (hash, &i) in &index.tags {
-        let t = &container.tags[i];
-        objects.insert(hex(hash), info("tag", t.size, t.size_disk));
+    for t in &container.tags {
+        objects.insert(hex(&t.hash), info("tag", t.size, t.size_disk));
     }
     objects
 }

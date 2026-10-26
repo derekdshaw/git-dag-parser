@@ -9,7 +9,7 @@ use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::debug;
 
-use super::content::{parse_commit, parse_tree};
+use super::content::{parse_commit, parse_tag, parse_tree};
 use crate::error::ParseError;
 use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
 use crate::models::{Blob, Commit, ObjectContainer, Tag, Tree};
@@ -209,7 +209,7 @@ fn parse_pack_file(
             &index,
             &hash_to_offset,
             entry,
-            size_disk as u32,
+            size_disk,
             &mut delta_arena,
             &mut delta_cache,
             commits_raw,
@@ -287,7 +287,7 @@ fn parse_pack_object(
     index: &PackIndex,
     hash_to_offset: &HashMap<ObjectHash, u64>,
     entry: &PackIndexEntry,
-    size_disk: u32,
+    size_disk: u64,
     delta_arena: &mut DeltaArena,
     delta_cache: &mut HashMap<u64, DeltaCacheEntry>,
     commits_raw: &mut HashMap<ObjectHash, CommitRaw>,
@@ -331,7 +331,9 @@ fn parse_pack_object(
     // Blob content is never needed, so blobs are never inflated
     if final_type == OBJ_BLOB {
         let index_val = container.blobs.len();
-        container.blobs.push(Blob::new(index_val, size as u32, size_disk));
+        container
+            .blobs
+            .push(Blob::new(index_val, entry.hash, size, size_disk));
         hash_index.blobs.insert(entry.hash, index_val);
         *skipped_blobs += 1;
         return Ok(());
@@ -356,7 +358,7 @@ fn parse_pack_object(
 
     store_object(
         final_type,
-        size as u32,
+        size,
         size_disk,
         &obj_data,
         &entry.hash,
@@ -690,8 +692,8 @@ fn read_varint(data: &[u8]) -> Result<(u64, usize)> {
 /// Store a parsed object in the appropriate container
 fn store_object(
     obj_type: u8,
-    size: u32,
-    size_disk: u32,
+    size: u64,
+    size_disk: u64,
     data: &[u8],
     hash: &ObjectHash,
     commits_raw: &mut HashMap<ObjectHash, CommitRaw>,
@@ -702,7 +704,7 @@ fn store_object(
     match obj_type {
         OBJ_COMMIT => {
             let index = container.commits.len();
-            container.commits.push(Commit::new(index, size, size_disk));
+            container.commits.push(Commit::new(index, *hash, size, size_disk));
             hash_index.commits.insert(*hash, index);
 
             let raw = parse_commit(data, index)?;
@@ -710,7 +712,7 @@ fn store_object(
         }
         OBJ_TREE => {
             let index = container.trees.len();
-            container.trees.push(Tree::new(index, size, size_disk));
+            container.trees.push(Tree::new(index, *hash, size, size_disk));
             hash_index.trees.insert(*hash, index);
 
             let entries = parse_tree(data)?;
@@ -718,23 +720,15 @@ fn store_object(
         }
         OBJ_BLOB => {
             let index = container.blobs.len();
-            container.blobs.push(Blob::new(index, size, size_disk));
+            container.blobs.push(Blob::new(index, *hash, size, size_disk));
             hash_index.blobs.insert(*hash, index);
         }
         OBJ_TAG => {
             let index = container.tags.len();
-            let mut tag = Tag::new(index, size, size_disk);
-
-            if let Ok(content) = std::str::from_utf8(data) {
-                for line in content.lines() {
-                    if let Some(name) = line.strip_prefix("tag ") {
-                        tag.name = Some(name.to_string());
-                        break;
-                    }
-                }
-            }
-
-            container.tags.push(tag);
+            let raw = parse_tag(data)?;
+            container
+                .tags
+                .push(Tag::new(index, *hash, size, size_disk, raw.name, raw.target));
             hash_index.tags.insert(*hash, index);
         }
         _ => {

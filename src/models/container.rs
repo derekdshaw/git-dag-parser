@@ -1,7 +1,7 @@
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 
-use super::objects::{Blob, Commit, Tag, Tree};
+use super::objects::{Blob, Commit, ObjectId, Ref, Tag, Tree};
 
 /// Hash type alias for Git object hashes (20 bytes for SHA-1)
 pub type ObjectHash = [u8; 20];
@@ -17,6 +17,8 @@ pub struct ObjectContainer {
     pub blobs: Vec<Blob>,
     /// All tag objects
     pub tags: Vec<Tag>,
+    /// All refs that point directly at an object
+    pub refs: Vec<Ref>,
 }
 
 impl ObjectContainer {
@@ -32,6 +34,17 @@ impl ObjectContainer {
             trees: Vec::with_capacity(trees),
             blobs: Vec::with_capacity(blobs),
             tags: Vec::with_capacity(tags),
+            refs: Vec::new(),
+        }
+    }
+
+    /// Hash of the object an id refers to
+    pub fn hash_of(&self, id: ObjectId) -> ObjectHash {
+        match id {
+            ObjectId::Commit(i) => self.commits[i].hash,
+            ObjectId::Tree(i) => self.trees[i].hash,
+            ObjectId::Blob(i) => self.blobs[i].hash,
+            ObjectId::Tag(i) => self.tags[i].hash,
         }
     }
 }
@@ -61,12 +74,22 @@ impl HashIndex {
         }
     }
 
+    /// Find an object of any type by hash
+    pub fn get(&self, hash: &ObjectHash) -> Option<ObjectId> {
+        if let Some(&i) = self.commits.get(hash) {
+            Some(ObjectId::Commit(i))
+        } else if let Some(&i) = self.trees.get(hash) {
+            Some(ObjectId::Tree(i))
+        } else if let Some(&i) = self.blobs.get(hash) {
+            Some(ObjectId::Blob(i))
+        } else {
+            self.tags.get(hash).map(|&i| ObjectId::Tag(i))
+        }
+    }
+
     /// True if an object with this hash is indexed under any type
     pub fn contains(&self, hash: &ObjectHash) -> bool {
-        self.commits.contains_key(hash)
-            || self.trees.contains_key(hash)
-            || self.blobs.contains_key(hash)
-            || self.tags.contains_key(hash)
+        self.get(hash).is_some()
     }
 }
 
@@ -79,6 +102,8 @@ pub struct CommitRaw {
     pub root_tree_hash: ObjectHash,
     /// Hashes of parent commits (for DAG structure)
     pub parent_hashes: Vec<ObjectHash>,
+    /// Committer timestamp, seconds since the Unix epoch
+    pub commit_time: i64,
 }
 
 /// Raw tree data extracted during Phase 1 parsing
@@ -209,5 +234,26 @@ mod tests {
         assert!(index.contains(&[1; 20]));
         assert!(index.contains(&[2; 20]));
         assert!(!index.contains(&[3; 20]));
+    }
+
+    #[test]
+    fn hash_index_get_returns_typed_id() {
+        let mut index = HashIndex::new();
+        index.commits.insert([1; 20], 4);
+        index.blobs.insert([2; 20], 9);
+
+        assert_eq!(index.get(&[1; 20]), Some(ObjectId::Commit(4)));
+        assert_eq!(index.get(&[2; 20]), Some(ObjectId::Blob(9)));
+        assert_eq!(index.get(&[3; 20]), None);
+    }
+
+    #[test]
+    fn hash_of_reads_the_right_container() {
+        let mut container = ObjectContainer::new();
+        container.trees.push(Tree::new(0, [5; 20], 0, 0));
+        container.tags.push(Tag::new(0, [6; 20], 0, 0, b"v1".to_vec(), [5; 20]));
+
+        assert_eq!(container.hash_of(ObjectId::Tree(0)), [5; 20]);
+        assert_eq!(container.hash_of(ObjectId::Tag(0)), [6; 20]);
     }
 }

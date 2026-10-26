@@ -1,4 +1,4 @@
-//! Parsers for commit and tree object bodies, shared by the pack and loose
+//! Parsers for commit, tree and tag object bodies, shared by the pack and loose
 //! object readers. Bodies are handled as bytes: git does not require file
 //! names, author names or messages to be UTF-8.
 
@@ -7,17 +7,34 @@ use anyhow::Result;
 use crate::error::ParseError;
 use crate::models::container::{CommitRaw, ObjectHash, TreeEntry};
 
-/// Extract the root tree and parent hashes from a commit body
+/// Fields of an annotated tag body
+#[derive(Debug)]
+pub struct TagRaw {
+    /// Hash from the `object` header
+    pub target: ObjectHash,
+    /// Name from the `tag` header
+    pub name: Vec<u8>,
+}
+
+/// Header lines of a commit or tag body. Headers end at the first blank
+/// line; the message after it is never read.
+fn header_lines(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    data.split(|&b| b == b'\n').take_while(|l| !l.is_empty())
+}
+
+/// Extract the root tree, parent hashes and committer time from a commit body
 pub fn parse_commit(data: &[u8], index: usize) -> Result<CommitRaw> {
     let mut tree_hash = None;
     let mut parent_hashes = Vec::new();
+    let mut commit_time = None;
 
-    // Headers end at the first blank line; the message after it is never read.
-    for line in data.split(|&b| b == b'\n').take_while(|l| !l.is_empty()) {
+    for line in header_lines(data) {
         if let Some(hex) = line.strip_prefix(b"tree ") {
             tree_hash = Some(hex_to_hash(hex)?);
         } else if let Some(hex) = line.strip_prefix(b"parent ") {
             parent_hashes.push(hex_to_hash(hex)?);
+        } else if let Some(ident) = line.strip_prefix(b"committer ") {
+            commit_time = Some(parse_ident_time(ident)?);
         }
     }
 
@@ -26,6 +43,40 @@ pub fn parse_commit(data: &[u8], index: usize) -> Result<CommitRaw> {
         root_tree_hash: tree_hash
             .ok_or_else(|| ParseError::InvalidObjectFormat("commit missing tree".into()))?,
         parent_hashes,
+        commit_time: commit_time
+            .ok_or_else(|| ParseError::InvalidObjectFormat("commit missing committer".into()))?,
+    })
+}
+
+/// Timestamp from an identity line: `<name> <<email>> <seconds> <tz>`. Read
+/// from the right, since names may contain spaces.
+fn parse_ident_time(ident: &[u8]) -> Result<i64> {
+    let seconds = ident
+        .rsplit(|&b| b == b' ')
+        .nth(1)
+        .ok_or_else(|| ParseError::InvalidObjectFormat("identity missing timestamp".into()))?;
+    std::str::from_utf8(seconds)?
+        .parse()
+        .map_err(|_| ParseError::InvalidObjectFormat("invalid timestamp".into()).into())
+}
+
+/// Extract the target hash and name from an annotated tag body
+pub fn parse_tag(data: &[u8]) -> Result<TagRaw> {
+    let mut target = None;
+    let mut name = Vec::new();
+
+    for line in header_lines(data) {
+        if let Some(hex) = line.strip_prefix(b"object ") {
+            target = Some(hex_to_hash(hex)?);
+        } else if let Some(tag_name) = line.strip_prefix(b"tag ") {
+            name = tag_name.to_vec();
+        }
+    }
+
+    Ok(TagRaw {
+        target: target
+            .ok_or_else(|| ParseError::InvalidObjectFormat("tag missing object".into()))?,
+        name,
     })
 }
 
@@ -108,13 +159,16 @@ mod tests {
         body.extend_from_slice(PARENT1_HEX);
         body.extend_from_slice(b"\nparent ");
         body.extend_from_slice(PARENT2_HEX);
-        // Latin-1 author and message, as written with i18n.commitEncoding set.
-        body.extend_from_slice(b"\nauthor Ren\xe9 <r@example.com> 1700000000 +0000\n");
+        // Latin-1 names and message, as written with i18n.commitEncoding set.
+        // Author and committer times differ so the right one must be picked.
+        body.extend_from_slice(b"\nauthor Ren\xe9 Q <r@example.com> 1700000000 +0000\n");
+        body.extend_from_slice(b"committer Ren\xe9 Q <r@example.com> 1700000555 -0700\n");
         body.extend_from_slice(b"encoding ISO-8859-1\n\ncaf\xe9\n");
 
         let raw = parse_commit(&body, 7).unwrap();
 
         assert_eq!(raw.index, 7);
+        assert_eq!(raw.commit_time, 1700000555);
         assert_eq!(raw.root_tree_hash, hex_to_hash(TREE_HEX).unwrap());
         assert_eq!(
             raw.parent_hashes,
@@ -130,6 +184,7 @@ mod tests {
         let mut body = Vec::new();
         body.extend_from_slice(b"tree ");
         body.extend_from_slice(TREE_HEX);
+        body.extend_from_slice(b"\ncommitter C <c@example.com> 1 +0000");
         body.extend_from_slice(b"\n\nparent ");
         body.extend_from_slice(PARENT1_HEX);
         body.push(b'\n');
@@ -137,6 +192,20 @@ mod tests {
         let raw = parse_commit(&body, 0).unwrap();
 
         assert!(raw.parent_hashes.is_empty());
+    }
+
+    #[test]
+    fn parse_tag_reads_target_and_name() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"object ");
+        body.extend_from_slice(TREE_HEX);
+        body.extend_from_slice(b"\ntype tree\ntag v1.0\n");
+        body.extend_from_slice(b"tagger T <t@example.com> 1700000000 +0000\n\nmessage\n");
+
+        let raw = parse_tag(&body).unwrap();
+
+        assert_eq!(raw.target, hex_to_hash(TREE_HEX).unwrap());
+        assert_eq!(raw.name, b"v1.0");
     }
 
     #[test]
