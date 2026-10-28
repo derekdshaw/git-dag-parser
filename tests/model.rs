@@ -60,8 +60,14 @@ fn annotated_tag_names_and_targets_match_git() {
         .tags
         .iter()
         .map(|t| {
-            let target = t.target.map(|id| hex(&container.hash_of(id))).unwrap_or_default();
-            (hex(&t.hash), (String::from_utf8_lossy(&t.name).into_owned(), target))
+            let target = t
+                .target
+                .map(|id| hex(&container.hash_of(id)))
+                .unwrap_or_default();
+            (
+                hex(&t.hash),
+                (String::from_utf8_lossy(&t.name).into_owned(), target),
+            )
         })
         .collect();
     assert_eq!(actual, expected);
@@ -84,7 +90,10 @@ fn refs_match_git() {
         .iter()
         .filter(|r| r.kind != RefKind::Head)
         .map(|r| {
-            let target = r.target.map(|id| hex(&container.hash_of(id))).unwrap_or_default();
+            let target = r
+                .target
+                .map(|id| hex(&container.hash_of(id)))
+                .unwrap_or_default();
             (String::from_utf8_lossy(&r.name).into_owned(), target)
         })
         .collect();
@@ -96,7 +105,10 @@ fn refs_match_git() {
         .map(|r| (r.name.as_slice(), r.kind))
         .collect();
     assert_eq!(kinds[b"refs/heads/feature".as_slice()], RefKind::Branch);
-    assert_eq!(kinds[b"refs/remotes/origin/main".as_slice()], RefKind::Remote);
+    assert_eq!(
+        kinds[b"refs/remotes/origin/main".as_slice()],
+        RefKind::Remote
+    );
     assert_eq!(kinds[b"refs/tags/v1".as_slice()], RefKind::Tag);
     assert_eq!(kinds[b"refs/stash".as_slice()], RefKind::Stash);
 }

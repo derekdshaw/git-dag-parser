@@ -38,7 +38,10 @@ fn every_object_matches_git_type_and_sizes() {
 #[test]
 fn objects_in_multiple_packs_are_counted_once() {
     let repo = Repo::with_overlapping_packs();
-    assert!(repo.pack_count() >= 2, "fixture must have overlapping packs");
+    assert!(
+        repo.pack_count() >= 2,
+        "fixture must have overlapping packs"
+    );
 
     let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
@@ -245,13 +248,25 @@ fn objects_are_in_hash_order() {
 
     let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
-    let commits: Vec<_> = container.commits.iter().map(|o| (o.index, o.hash)).collect();
+    let commits: Vec<_> = container
+        .commits
+        .iter()
+        .map(|o| (o.index, o.hash))
+        .collect();
     let trees: Vec<_> = container.trees.iter().map(|o| (o.index, o.hash)).collect();
     let blobs: Vec<_> = container.blobs.iter().map(|o| (o.index, o.hash)).collect();
     let tags: Vec<_> = container.tags.iter().map(|o| (o.index, o.hash)).collect();
-    for (kind, objects) in [("commit", commits), ("tree", trees), ("blob", blobs), ("tag", tags)] {
+    for (kind, objects) in [
+        ("commit", commits),
+        ("tree", trees),
+        ("blob", blobs),
+        ("tag", tags),
+    ] {
         assert!(
-            objects.iter().enumerate().all(|(pos, &(index, _))| pos == index),
+            objects
+                .iter()
+                .enumerate()
+                .all(|(pos, &(index, _))| pos == index),
             "{kind} index equals position"
         );
         assert!(

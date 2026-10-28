@@ -57,7 +57,10 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
     // Resolve tree entry indices now that all objects are indexed
     let resolve_start = Instant::now();
     resolve_tree_entries(&mut trees_raw, &hash_index);
-    println!("Resolved tree entry indices in {:?}", resolve_start.elapsed());
+    println!(
+        "Resolved tree entry indices in {:?}",
+        resolve_start.elapsed()
+    );
 
     resolve_commits(&commits_raw, &hash_index, &mut container);
     resolve_tags(&hash_index, &mut container);

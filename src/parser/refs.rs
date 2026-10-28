@@ -126,7 +126,10 @@ mod tests {
 
     #[test]
     fn parse_loose_ref_reads_hash_and_skips_symbolic() {
-        assert_eq!(parse_loose_ref(format!("{A}\n").as_bytes()).unwrap(), Some(hash(A)));
+        assert_eq!(
+            parse_loose_ref(format!("{A}\n").as_bytes()).unwrap(),
+            Some(hash(A))
+        );
         assert_eq!(parse_loose_ref(b"ref: refs/heads/main\n").unwrap(), None);
     }
 

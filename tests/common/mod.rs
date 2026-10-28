@@ -73,7 +73,15 @@ impl Repo {
             repo.commit(format!("commit {round}"));
         }
         repo.git(&["tag", "-a", "v1", "-m", "release v1"]);
-        repo.git(&["repack", "-a", "-d", "-f", "--depth=50", "--window=50", "-q"]);
+        repo.git(&[
+            "repack",
+            "-a",
+            "-d",
+            "-f",
+            "--depth=50",
+            "--window=50",
+            "-q",
+        ]);
 
         repo.write("loose.txt", "only in a loose object\n");
         repo.commit("loose commit");
@@ -128,7 +136,14 @@ impl Repo {
 
         repo.git(&["tag", "light"]);
         repo.git(&["tag", "-a", "v1", "-m", "release v1"]);
-        repo.git(&["tag", "-a", "tree-tag", "-m", "tag of a tree", "HEAD^{tree}"]);
+        repo.git(&[
+            "tag",
+            "-a",
+            "tree-tag",
+            "-m",
+            "tag of a tree",
+            "HEAD^{tree}",
+        ]);
         repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
         repo.git(&[
             "symbolic-ref",

@@ -604,12 +604,10 @@ impl PackIndex {
         let mut entries = Vec::with_capacity(total_objects);
 
         for i in 0..total_objects {
-            let hash: ObjectHash =
-                data[sha_start + i * 20..sha_start + (i + 1) * 20].try_into()?;
+            let hash: ObjectHash = data[sha_start + i * 20..sha_start + (i + 1) * 20].try_into()?;
 
-            let crc32 = u32::from_be_bytes(
-                data[crc_start + i * 4..crc_start + (i + 1) * 4].try_into()?,
-            );
+            let crc32 =
+                u32::from_be_bytes(data[crc_start + i * 4..crc_start + (i + 1) * 4].try_into()?);
 
             let offset_raw = u32::from_be_bytes(
                 data[offset_start + i * 4..offset_start + (i + 1) * 4].try_into()?,
@@ -626,7 +624,11 @@ impl PackIndex {
                 offset_raw as u64
             };
 
-            entries.push(PackIndexEntry { hash, offset, crc32 });
+            entries.push(PackIndexEntry {
+                hash,
+                offset,
+                crc32,
+            });
         }
 
         Ok(Self { entries })
@@ -636,10 +638,7 @@ impl PackIndex {
 /// Hex encoding for error messages and debug output
 mod hex {
     pub fn encode(data: impl AsRef<[u8]>) -> String {
-        data.as_ref()
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect()
+        data.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
     }
 }
 

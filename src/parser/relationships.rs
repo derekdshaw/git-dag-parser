@@ -81,12 +81,8 @@ pub fn build_relationships(
                 }
 
                 for (commit_idx, root_tree_hash, parent_hashes) in chunk {
-                    let result = diff_commit_tree(
-                        commit_idx,
-                        &root_tree_hash,
-                        &parent_hashes,
-                        &context,
-                    );
+                    let result =
+                        diff_commit_tree(commit_idx, &root_tree_hash, &parent_hashes, &context);
 
                     if tx.send(result).is_err() {
                         break;
@@ -113,10 +109,7 @@ pub fn build_relationships(
         if processed.is_multiple_of(5000) {
             let avg_trees = total_trees / processed;
             let avg_blobs = total_blobs / processed;
-            progress.set_message(format!(
-                "avg: {}t/{}b per commit",
-                avg_trees, avg_blobs,
-            ));
+            progress.set_message(format!("avg: {}t/{}b per commit", avg_trees, avg_blobs,));
         }
     }
 
@@ -157,7 +150,13 @@ fn diff_commit_tree(
         .and_then(|parent_hash| context.commits_raw.get(parent_hash))
         .and_then(|parent_commit| context.trees_raw.get(&parent_commit.root_tree_hash));
 
-    diff_trees(current_tree, parent_tree, "", &context.trees_raw, &mut result);
+    diff_trees(
+        current_tree,
+        parent_tree,
+        "",
+        &context.trees_raw,
+        &mut result,
+    );
 
     result
 }

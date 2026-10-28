@@ -399,7 +399,10 @@ mod tests {
     #[test]
     fn ref_kind_from_name_classifies_by_namespace() {
         assert_eq!(RefKind::from_name(b"refs/heads/main"), RefKind::Branch);
-        assert_eq!(RefKind::from_name(b"refs/remotes/origin/main"), RefKind::Remote);
+        assert_eq!(
+            RefKind::from_name(b"refs/remotes/origin/main"),
+            RefKind::Remote
+        );
         assert_eq!(RefKind::from_name(b"refs/tags/v1"), RefKind::Tag);
         assert_eq!(RefKind::from_name(b"refs/stash"), RefKind::Stash);
         assert_eq!(RefKind::from_name(b"HEAD"), RefKind::Head);

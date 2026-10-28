@@ -60,8 +60,7 @@ fn find_git_dir(repo_path: &Path) -> Result<PathBuf> {
 
     // Check if .git is a file (worktree)
     if git_dir.is_file() {
-        let content = std::fs::read_to_string(&git_dir)
-            .context("Failed to read .git file")?;
+        let content = std::fs::read_to_string(&git_dir).context("Failed to read .git file")?;
 
         if let Some(path) = content.strip_prefix("gitdir: ") {
             let path = path.trim();
