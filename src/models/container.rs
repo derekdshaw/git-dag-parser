@@ -1,7 +1,7 @@
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 
-use super::objects::{Blob, Commit, ObjectId, Ref, Tag, Tree};
+use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, Tag, Tree};
 
 /// Hash type alias for Git object hashes (20 bytes for SHA-1)
 pub type ObjectHash = [u8; 20];
@@ -19,6 +19,10 @@ pub struct ObjectContainer {
     pub tags: Vec<Tag>,
     /// All refs that point directly at an object
     pub refs: Vec<Ref>,
+    /// All pack files in the object store
+    pub packs: Vec<Pack>,
+    /// Every on-disk copy of every object, across packs and loose files
+    pub copies: Vec<ObjectCopy>,
 }
 
 impl ObjectContainer {
@@ -35,6 +39,8 @@ impl ObjectContainer {
             blobs: Vec::with_capacity(blobs),
             tags: Vec::with_capacity(tags),
             refs: Vec::new(),
+            packs: Vec::new(),
+            copies: Vec::new(),
         }
     }
 
@@ -49,13 +55,12 @@ impl ObjectContainer {
     }
 }
 
-/// Index for looking up objects by hash
+/// Index for looking up objects by hash. One map for all kinds, since pass
+/// 1 must ask "have I seen this hash?" once per copy and building hash maps
+/// is the most expensive part of that pass.
 #[derive(Debug, Default)]
 pub struct HashIndex {
-    pub commits: HashMap<ObjectHash, usize>,
-    pub trees: HashMap<ObjectHash, usize>,
-    pub blobs: HashMap<ObjectHash, usize>,
-    pub tags: HashMap<ObjectHash, usize>,
+    map: HashMap<ObjectHash, ObjectId>,
 }
 
 impl HashIndex {
@@ -63,33 +68,67 @@ impl HashIndex {
         Self::default()
     }
 
-    /// Pre-allocate capacity based on expected object counts
-    #[allow(dead_code)]
-    pub fn with_capacity(commits: usize, trees: usize, blobs: usize, tags: usize) -> Self {
+    /// Pre-allocate for an expected number of distinct objects
+    pub fn with_capacity(objects: usize) -> Self {
         Self {
-            commits: HashMap::with_capacity(commits),
-            trees: HashMap::with_capacity(trees),
-            blobs: HashMap::with_capacity(blobs),
-            tags: HashMap::with_capacity(tags),
+            map: HashMap::with_capacity(objects),
         }
+    }
+
+    /// Record an object, returning the previous id if the hash was known
+    pub fn insert(&mut self, hash: ObjectHash, id: ObjectId) -> Option<ObjectId> {
+        self.map.insert(hash, id)
     }
 
     /// Find an object of any type by hash
     pub fn get(&self, hash: &ObjectHash) -> Option<ObjectId> {
-        if let Some(&i) = self.commits.get(hash) {
-            Some(ObjectId::Commit(i))
-        } else if let Some(&i) = self.trees.get(hash) {
-            Some(ObjectId::Tree(i))
-        } else if let Some(&i) = self.blobs.get(hash) {
-            Some(ObjectId::Blob(i))
-        } else {
-            self.tags.get(hash).map(|&i| ObjectId::Tag(i))
-        }
+        self.map.get(hash).copied()
     }
 
     /// True if an object with this hash is indexed under any type
     pub fn contains(&self, hash: &ObjectHash) -> bool {
-        self.get(hash).is_some()
+        self.map.contains_key(hash)
+    }
+
+    /// Number of distinct objects
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Index of the commit with this hash; None if absent or not a commit
+    pub fn commit(&self, hash: &ObjectHash) -> Option<usize> {
+        match self.get(hash) {
+            Some(ObjectId::Commit(i)) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// Index of the tree with this hash; None if absent or not a tree
+    pub fn tree(&self, hash: &ObjectHash) -> Option<usize> {
+        match self.get(hash) {
+            Some(ObjectId::Tree(i)) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// Index of the blob with this hash; None if absent or not a blob
+    pub fn blob(&self, hash: &ObjectHash) -> Option<usize> {
+        match self.get(hash) {
+            Some(ObjectId::Blob(i)) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// Index of the tag with this hash; None if absent or not a tag
+    pub fn tag(&self, hash: &ObjectHash) -> Option<usize> {
+        match self.get(hash) {
+            Some(ObjectId::Tag(i)) => Some(i),
+            _ => None,
+        }
     }
 }
 
@@ -228,19 +267,20 @@ mod tests {
     #[test]
     fn hash_index_contains_finds_any_type() {
         let mut index = HashIndex::new();
-        index.trees.insert([1; 20], 0);
-        index.tags.insert([2; 20], 0);
+        index.insert([1; 20], ObjectId::Tree(0));
+        index.insert([2; 20], ObjectId::Tag(0));
 
         assert!(index.contains(&[1; 20]));
         assert!(index.contains(&[2; 20]));
         assert!(!index.contains(&[3; 20]));
+        assert_eq!(index.len(), 2);
     }
 
     #[test]
     fn hash_index_get_returns_typed_id() {
         let mut index = HashIndex::new();
-        index.commits.insert([1; 20], 4);
-        index.blobs.insert([2; 20], 9);
+        index.insert([1; 20], ObjectId::Commit(4));
+        index.insert([2; 20], ObjectId::Blob(9));
 
         assert_eq!(index.get(&[1; 20]), Some(ObjectId::Commit(4)));
         assert_eq!(index.get(&[2; 20]), Some(ObjectId::Blob(9)));
@@ -248,10 +288,65 @@ mod tests {
     }
 
     #[test]
+    fn hash_index_typed_lookups_only_match_their_own_kind() {
+        let mut index = HashIndex::new();
+        index.insert([1; 20], ObjectId::Commit(4));
+        index.insert([2; 20], ObjectId::Tree(5));
+        index.insert([3; 20], ObjectId::Blob(6));
+        index.insert([4; 20], ObjectId::Tag(7));
+
+        assert_eq!(index.commit(&[1; 20]), Some(4));
+        assert_eq!(index.tree(&[2; 20]), Some(5));
+        assert_eq!(index.blob(&[3; 20]), Some(6));
+        assert_eq!(index.tag(&[4; 20]), Some(7));
+
+        assert_eq!(index.tree(&[1; 20]), None);
+        assert_eq!(index.commit(&[2; 20]), None);
+        assert_eq!(index.blob(&[9; 20]), None);
+    }
+
+    #[test]
+    fn container_starts_with_no_packs_or_copies() {
+        let container = ObjectContainer::new();
+        assert!(container.packs.is_empty());
+        assert!(container.copies.is_empty());
+
+        let container = ObjectContainer::with_capacity(1, 2, 3, 4);
+        assert!(container.packs.is_empty());
+        assert!(container.copies.is_empty());
+    }
+
+    #[test]
+    fn container_serializes_packs_and_copies() {
+        let mut container = ObjectContainer::new();
+        container.blobs.push(Blob::new(0, [1; 20], 10, 5));
+        container
+            .packs
+            .push(Pack::new(0, "pack-a.pack".to_string(), 100, 1_700_000_000));
+        container.copies.push(ObjectCopy::packed(
+            ObjectId::Blob(0),
+            0,
+            12,
+            5,
+            false,
+            1_700_000_000,
+        ));
+        container
+            .copies
+            .push(ObjectCopy::loose(ObjectId::Blob(0), 9, 1_700_000_001));
+
+        let json = serde_json::to_string(&container).unwrap();
+        let back: ObjectContainer = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.packs, container.packs);
+        assert_eq!(back.copies, container.copies);
+    }
+
+    #[test]
     fn hash_of_reads_the_right_container() {
         let mut container = ObjectContainer::new();
         container.trees.push(Tree::new(0, [5; 20], 0, 0));
-        container.tags.push(Tag::new(0, [6; 20], 0, 0, b"v1".to_vec(), [5; 20]));
+        container.tags.push(Tag::new(0, [6; 20], 0, 0));
 
         assert_eq!(container.hash_of(ObjectId::Tree(0)), [5; 20]);
         assert_eq!(container.hash_of(ObjectId::Tag(0)), [6; 20]);

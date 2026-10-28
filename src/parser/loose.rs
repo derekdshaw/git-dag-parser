@@ -1,173 +1,220 @@
+//! Loose objects: `objects/xx/yyyy...`, each a zlib stream of
+//! `<type> <size>\0<body>`.
+
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use flate2::read::ZlibDecoder;
-use hashbrown::HashMap;
-use tracing::debug;
 
-use super::content::{hex_to_hash, parse_commit, parse_tag, parse_tree};
 use crate::error::ParseError;
-use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
-use crate::models::{Blob, Commit, ObjectContainer, Tag, Tree};
+use crate::models::ObjectKind;
 
-/// Parse all loose objects in the objects directory
-pub fn parse_loose_objects(
-    objects_dir: &Path,
-    commits_raw: &mut HashMap<ObjectHash, CommitRaw>,
-    trees_raw: &mut HashMap<ObjectHash, TreeRaw>,
-    hash_index: &mut HashIndex,
-    container: &mut ObjectContainer,
-) -> Result<()> {
-    // Loose objects are stored in subdirectories named by the first two hex chars
-    // e.g., .git/objects/ab/cdef1234...
-    for entry in std::fs::read_dir(objects_dir)? {
-        let entry = entry?;
-        let path = entry.path();
+/// Enough inflated bytes to hold any loose object header: the longest type
+/// name is `commit` (6), plus a space, up to 20 digits of size, and the null.
+const LOOSE_HEADER_MAX: usize = 32;
 
-        // Skip non-directories and special directories
-        if !path.is_dir() {
-            continue;
+/// Read a loose object's type and size without inflating its body.
+///
+/// Only the first `LOOSE_HEADER_MAX` bytes of the zlib stream are inflated,
+/// so the cost is constant no matter how large the object is.
+pub fn read_loose_header(path: &Path) -> Result<(ObjectKind, u64)> {
+    let file = File::open(path).context("Failed to open loose object")?;
+    let mut decoder = ZlibDecoder::new(file);
+
+    let mut prefix = [0u8; LOOSE_HEADER_MAX];
+    let mut len = 0;
+    let mut ended = false;
+    while len < prefix.len() {
+        // A short object inflates to fewer bytes than the buffer holds and
+        // then ends. A stream that is corrupt within these bytes is an error;
+        // damage further into a large body is not seen, since the body is
+        // never inflated.
+        let n = decoder
+            .read(&mut prefix[len..])
+            .map_err(|e| ParseError::DecompressionError(e.to_string()))?;
+        if n == 0 {
+            ended = true;
+            break;
         }
-
-        let dir_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-
-        // Skip pack and info directories
-        if dir_name == "pack" || dir_name == "info" {
-            continue;
-        }
-
-        // Must be a 2-character hex directory
-        if dir_name.len() != 2 || !dir_name.chars().all(|c| c.is_ascii_hexdigit()) {
-            continue;
-        }
-
-        // Process all objects in this directory
-        for obj_entry in std::fs::read_dir(&path)? {
-            let obj_entry = obj_entry?;
-            let obj_path = obj_entry.path();
-
-            if !obj_path.is_file() {
-                continue;
-            }
-
-            let obj_name = obj_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-
-            // Must be a 38-character hex filename
-            if obj_name.len() != 38 || !obj_name.chars().all(|c| c.is_ascii_hexdigit()) {
-                continue;
-            }
-
-            // Construct the full hash
-            let hash_hex = format!("{}{}", dir_name, obj_name);
-            let hash = hex_to_hash(hash_hex.as_bytes())?;
-
-            // Skip if already indexed (from pack files)
-            if hash_index.contains(&hash) {
-                continue;
-            }
-
-            debug!("Parsing loose object: {}", hash_hex);
-            parse_loose_object(
-                &obj_path,
-                &hash,
-                commits_raw,
-                trees_raw,
-                hash_index,
-                container,
-            )?;
-        }
+        len += n;
     }
 
-    Ok(())
+    let (kind, size, body_start) = parse_loose_header(&prefix[..len])?;
+    // When the stream ended inside the prefix, the whole body is here. Some
+    // zlib backends end a cut-short stream without an error, so its length
+    // is the check that the object is complete.
+    let body_len = (len - body_start) as u64;
+    if ended && body_len != size {
+        return Err(ParseError::InvalidObjectFormat(format!(
+            "loose object body is {body_len} bytes, header says {size}"
+        ))
+        .into());
+    }
+    Ok((kind, size))
 }
 
-/// Parse a single loose object file
-fn parse_loose_object(
-    path: &Path,
-    hash: &ObjectHash,
-    commits_raw: &mut HashMap<ObjectHash, CommitRaw>,
-    trees_raw: &mut HashMap<ObjectHash, TreeRaw>,
-    hash_index: &mut HashIndex,
-    container: &mut ObjectContainer,
-) -> Result<()> {
-    // Read and decompress the file
+/// Read and inflate a whole loose object, returning its kind and body
+pub fn read_loose_object(path: &Path) -> Result<(ObjectKind, Vec<u8>)> {
     let file = File::open(path).context("Failed to open loose object")?;
-    let file_size = file.metadata()?.len();
-    let mut decoder = ZlibDecoder::new(file);
     let mut data = Vec::new();
-    decoder
+    ZlibDecoder::new(file)
         .read_to_end(&mut data)
         .map_err(|e| ParseError::DecompressionError(e.to_string()))?;
 
-    // Parse header: "<type> <size>\0<content>"
+    let (kind, size, body_start) = parse_loose_header(&data)?;
+    let body = data.split_off(body_start);
+    if body.len() as u64 != size {
+        return Err(ParseError::InvalidObjectFormat(format!(
+            "loose object body is {} bytes, header says {}",
+            body.len(),
+            size
+        ))
+        .into());
+    }
+    Ok((kind, body))
+}
+
+/// Split an inflated loose object header: `<type> <size>\0`, returning the
+/// type, the size, and the offset where the body starts
+fn parse_loose_header(data: &[u8]) -> Result<(ObjectKind, u64, usize)> {
     let null_pos = data
         .iter()
         .position(|&b| b == 0)
         .ok_or_else(|| ParseError::InvalidObjectFormat("missing null in header".into()))?;
 
     let header = std::str::from_utf8(&data[..null_pos])?;
-    let mut parts = header.split(' ');
+    let (kind, size) = header
+        .split_once(' ')
+        .ok_or_else(|| ParseError::InvalidObjectFormat("missing space in header".into()))?;
 
-    let obj_type = parts
-        .next()
-        .ok_or_else(|| ParseError::InvalidObjectFormat("missing type".into()))?;
+    let kind = ObjectKind::from_name(kind)
+        .ok_or_else(|| ParseError::InvalidObjectFormat(format!("unknown object type {kind}")))?;
 
-    let size: u64 = parts
-        .next()
-        .ok_or_else(|| ParseError::InvalidObjectFormat("missing size".into()))?
+    let size = size
         .parse()
         .map_err(|_| ParseError::InvalidObjectFormat("invalid size".into()))?;
 
-    let content = &data[null_pos + 1..];
+    Ok((kind, size, null_pos + 1))
+}
 
-    match obj_type {
-        "commit" => {
-            let index = container.commits.len();
-            container
-                .commits
-                .push(Commit::new(index, *hash, size, file_size));
-            hash_index.commits.insert(*hash, index);
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::path::PathBuf;
 
-            let raw = parse_commit(content, index)?;
-            commits_raw.insert(*hash, raw);
-        }
-        "tree" => {
-            let index = container.trees.len();
-            container
-                .trees
-                .push(Tree::new(index, *hash, size, file_size));
-            hash_index.trees.insert(*hash, index);
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
 
-            let entries = parse_tree(content)?;
-            trees_raw.insert(*hash, TreeRaw { index, entries });
+    use super::*;
+
+    fn write_object(dir: &Path, name: &str, body: &[u8], truncate_to: Option<usize>) -> PathBuf {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(body).unwrap();
+        let mut bytes = encoder.finish().unwrap();
+        if let Some(n) = truncate_to {
+            bytes.truncate(n);
         }
-        "blob" => {
-            let index = container.blobs.len();
-            container
-                .blobs
-                .push(Blob::new(index, *hash, size, file_size));
-            hash_index.blobs.insert(*hash, index);
-        }
-        "tag" => {
-            let index = container.tags.len();
-            let raw = parse_tag(content)?;
-            container
-                .tags
-                .push(Tag::new(index, *hash, size, file_size, raw.name, raw.target));
-            hash_index.tags.insert(*hash, index);
-        }
-        _ => {
-            // Ignore unknown types
-        }
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
     }
 
-    Ok(())
+    #[test]
+    fn parse_loose_header_reads_type_size_and_body_start() {
+        let (kind, size, body_start) = parse_loose_header(b"blob 12\0hello world\n").unwrap();
+        assert_eq!(kind, ObjectKind::Blob);
+        assert_eq!(size, 12);
+        assert_eq!(body_start, 8);
+
+        let (kind, size, body_start) = parse_loose_header(b"commit 1234\0tree ...").unwrap();
+        assert_eq!(kind, ObjectKind::Commit);
+        assert_eq!(size, 1234);
+        assert_eq!(body_start, 12);
+    }
+
+    #[test]
+    fn parse_loose_header_rejects_malformed_headers() {
+        // No null terminator within the prefix
+        assert!(parse_loose_header(b"blob 12").is_err());
+        // No space between type and size
+        assert!(parse_loose_header(b"blob12\0body").is_err());
+        // Size is not a number
+        assert!(parse_loose_header(b"blob xy\0body").is_err());
+        // Not a git object type
+        assert!(parse_loose_header(b"blobby 1\0x").is_err());
+    }
+
+    #[test]
+    fn read_loose_header_does_not_inflate_the_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut body = b"blob 1048576\0".to_vec();
+        body.extend(std::iter::repeat(b'x').take(1024 * 1024));
+        // Cut the stream short: inflating the whole object would fail, so this
+        // only passes if just the header is read.
+        let path = write_object(dir.path(), "truncated", &body, Some(64));
+
+        let (kind, size) = read_loose_header(&path).unwrap();
+
+        assert_eq!(kind, ObjectKind::Blob);
+        assert_eq!(size, 1024 * 1024);
+    }
+
+    #[test]
+    fn read_loose_header_reports_a_stream_that_breaks_after_the_header() {
+        // A small object cut short: the header inflates on the first read and
+        // the missing end of the stream is only seen on the next one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_object(dir.path(), "cut", b"blob 5\0hello", None);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.truncate(bytes.len() - 6);
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(read_loose_header(&path).is_err());
+    }
+
+    #[test]
+    fn read_loose_header_handles_objects_shorter_than_the_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_object(dir.path(), "tiny", b"blob 1\0x", None);
+
+        let (kind, size) = read_loose_header(&path).unwrap();
+
+        assert_eq!(kind, ObjectKind::Blob);
+        assert_eq!(size, 1);
+    }
+
+    #[test]
+    fn read_loose_object_returns_kind_and_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_object(dir.path(), "whole", b"tree 9\0100644 xy", None);
+
+        let (kind, body) = read_loose_object(&path).unwrap();
+
+        assert_eq!(kind, ObjectKind::Tree);
+        assert_eq!(body, b"100644 xy");
+    }
+
+    #[test]
+    fn read_loose_object_rejects_body_size_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_object(dir.path(), "short", b"blob 5\0abc", None);
+
+        assert!(read_loose_object(&path).is_err());
+    }
+
+    #[test]
+    fn read_loose_header_reads_every_object_type() {
+        let dir = tempfile::tempdir().unwrap();
+        for (kind, body) in [
+            (ObjectKind::Commit, &b"commit 5\0tree "[..]),
+            (ObjectKind::Tree, &b"tree 7\0100644 "[..]),
+            (ObjectKind::Blob, &b"blob 3\0abc"[..]),
+            (ObjectKind::Tag, &b"tag 9\0object ab"[..]),
+        ] {
+            let path = write_object(dir.path(), kind.name(), body, None);
+            assert_eq!(read_loose_header(&path).unwrap().0, kind);
+        }
+    }
 }

@@ -1,8 +1,10 @@
+mod bodies;
 mod content;
 mod loose;
 mod pack;
 mod refs;
 mod relationships;
+mod scan;
 
 use std::path::Path;
 use std::time::Instant;
@@ -17,7 +19,12 @@ pub use relationships::build_relationships;
 
 /// Parse all Git objects from a repository's object store
 ///
-/// This function reads both pack files and loose objects to build:
+/// Two passes over the object store:
+/// 1. Headers only, packs in offset order: every object, its kind and
+///    sizes, every on-disk copy, and which copy is primary.
+/// 2. Bodies of commits, trees and tags from their primary copies.
+///
+/// Returns:
 /// - Raw commit data (for tree walking in Phase 2)
 /// - Raw tree data (for tree walking in Phase 2)
 /// - Hash index (for resolving hashes to indices)
@@ -25,7 +32,7 @@ pub use relationships::build_relationships;
 ///   and parents, tag targets and refs resolved to indices
 ///
 /// Static relationships (tree→blob, tree→subtree, blob→tree) are also
-/// built during this phase since they're inherent to the tree structure.
+/// built here since they're inherent to the tree structure.
 pub fn parse_objects(
     git_dir: &Path,
 ) -> Result<(
@@ -34,34 +41,17 @@ pub fn parse_objects(
     HashIndex,
     ObjectContainer,
 )> {
-    let mut commits_raw: HashMap<ObjectHash, CommitRaw> = HashMap::new();
-    let mut trees_raw: HashMap<ObjectHash, TreeRaw> = HashMap::new();
-    let mut hash_index = HashIndex::new();
-    let mut container = ObjectContainer::new();
-
-    // Parse pack files
-    let pack_dir = git_dir.join("objects").join("pack");
-    if pack_dir.is_dir() {
-        pack::parse_pack_files(
-            &pack_dir,
-            &mut commits_raw,
-            &mut trees_raw,
-            &mut hash_index,
-            &mut container,
-        )?;
-    }
-
-    // Parse loose objects
-    let objects_dir = git_dir.join("objects");
-    if objects_dir.is_dir() {
-        loose::parse_loose_objects(
-            &objects_dir,
-            &mut commits_raw,
-            &mut trees_raw,
-            &mut hash_index,
-            &mut container,
-        )?;
-    }
+    let mut scanned = scan::scan_repository(git_dir)?;
+    let bodies::Bodies {
+        commits_raw,
+        mut trees_raw,
+    } = bodies::read_bodies(&mut scanned)?;
+    // Packs are closed here; everything needed is in memory.
+    let scan::Scan {
+        mut container,
+        index: hash_index,
+        ..
+    } = scanned.scan;
 
     // Resolve tree entry indices now that all objects are indexed
     let resolve_start = Instant::now();
@@ -89,9 +79,9 @@ fn resolve_tree_entries(trees_raw: &mut HashMap<ObjectHash, TreeRaw>, hash_index
     for tree_raw in trees_raw.values_mut() {
         for entry in &mut tree_raw.entries {
             entry.child_idx = if entry.kind.is_tree() {
-                hash_index.trees.get(&entry.hash).copied()
+                hash_index.tree(&entry.hash)
             } else if entry.kind.is_blob() {
-                hash_index.blobs.get(&entry.hash).copied()
+                hash_index.blob(&entry.hash)
             } else {
                 None // Submodules reference external commits
             };
@@ -107,11 +97,11 @@ fn resolve_commits(
 ) {
     for raw in commits_raw.values() {
         let commit = &mut container.commits[raw.index];
-        commit.tree = hash_index.trees.get(&raw.root_tree_hash).copied();
+        commit.tree = hash_index.tree(&raw.root_tree_hash);
         commit.parents = raw
             .parent_hashes
             .iter()
-            .filter_map(|hash| hash_index.commits.get(hash).copied())
+            .filter_map(|hash| hash_index.commit(hash))
             .collect();
         commit.boundary = commit.parents.len() < raw.parent_hashes.len();
         commit.commit_time = raw.commit_time;

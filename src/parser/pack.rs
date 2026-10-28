@@ -1,23 +1,25 @@
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use std::time::Instant;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use flate2::read::ZlibDecoder;
 use hashbrown::HashMap;
-use indicatif::{ProgressBar, ProgressStyle};
-use tracing::debug;
 
-use super::content::{parse_commit, parse_tag, parse_tree};
 use crate::error::ParseError;
-use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
-use crate::models::{Blob, Commit, ObjectContainer, Tag, Tree};
+use crate::models::container::ObjectHash;
+use crate::models::ObjectKind;
 
-/// Object type constants from Git pack format
+/// Object type constants from Git pack format. The four whole-object codes
+/// are mapped by `ObjectKind::from_pack_type`; they are kept here, where the
+/// format is documented, and used by the pack-building test helpers.
+#[allow(dead_code)]
 const OBJ_COMMIT: u8 = 1;
+#[allow(dead_code)]
 const OBJ_TREE: u8 = 2;
+#[allow(dead_code)]
 const OBJ_BLOB: u8 = 3;
+#[allow(dead_code)]
 const OBJ_TAG: u8 = 4;
 const OBJ_OFS_DELTA: u8 = 6;
 const OBJ_REF_DELTA: u8 = 7;
@@ -88,182 +90,8 @@ impl DeltaArena {
 /// Cache entry: (object_type, block_index, arena_offset, arena_len)
 type DeltaCacheEntry = (u8, u16, u32, u32);
 
-fn type_name(t: u8) -> &'static str {
-    match t {
-        OBJ_COMMIT => "commit",
-        OBJ_TREE => "tree",
-        OBJ_BLOB => "blob",
-        OBJ_TAG => "tag",
-        OBJ_OFS_DELTA => "ofs-delta",
-        OBJ_REF_DELTA => "ref-delta",
-        _ => "unknown",
-    }
-}
-
-/// Parse all pack files in the given directory
-pub fn parse_pack_files(
-    pack_dir: &Path,
-    commits_raw: &mut HashMap<ObjectHash, CommitRaw>,
-    trees_raw: &mut HashMap<ObjectHash, TreeRaw>,
-    hash_index: &mut HashIndex,
-    container: &mut ObjectContainer,
-) -> Result<()> {
-    let entries = std::fs::read_dir(pack_dir).context("Failed to read pack directory")?;
-
-    let mut pack_files: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().is_some_and(|ext| ext == "idx") {
-            let pack_path = path.with_extension("pack");
-            if pack_path.exists() {
-                pack_files.push((pack_path, path));
-            }
-        }
-    }
-
-    println!("Found {} pack file(s)", pack_files.len());
-
-    for (pack_path, idx_path) in &pack_files {
-        let pack_size = std::fs::metadata(pack_path)?.len();
-        println!(
-            "Parsing pack: {} ({:.2} MB)",
-            pack_path.file_name().unwrap_or_default().to_string_lossy(),
-            pack_size as f64 / (1024.0 * 1024.0)
-        );
-        parse_pack_file(pack_path, idx_path, commits_raw, trees_raw, hash_index, container)?;
-    }
-
-    Ok(())
-}
-
-/// Parse a single pack file and its index
-fn parse_pack_file(
-    pack_path: &Path,
-    idx_path: &Path,
-    commits_raw: &mut HashMap<ObjectHash, CommitRaw>,
-    trees_raw: &mut HashMap<ObjectHash, TreeRaw>,
-    hash_index: &mut HashIndex,
-    container: &mut ObjectContainer,
-) -> Result<()> {
-    let start = Instant::now();
-
-    // Parse the pack index to get object locations
-    let index = PackIndex::parse(idx_path)?;
-    let total_objects = index.entries.len();
-    println!("  Index parsed: {} objects ({:?})", total_objects, start.elapsed());
-
-    // Build offset→index lookup for fast REF_DELTA and OFS_DELTA resolution
-    println!("  Building hash lookup table...");
-    let hash_to_offset: HashMap<ObjectHash, u64> = index
-        .entries
-        .iter()
-        .map(|e| (e.hash, e.offset))
-        .collect();
-
-    // Memory-map the pack file for efficient random access
-    let pack_file = File::open(pack_path)?;
-    let pack_mmap = unsafe { memmap2::Mmap::map(&pack_file)? };
-    println!("  Pack file memory-mapped: {} bytes", pack_mmap.len());
-
-    // Verify pack header
-    verify_pack_header(&pack_mmap)?;
-    let header_obj_count = u32::from_be_bytes(pack_mmap[8..12].try_into()?);
-    println!("  Pack header: version 2, {} objects declared", header_obj_count);
-
-    // Delta resolution cache backed by block arena allocator
-    let mut delta_arena = DeltaArena::new(ARENA_BLOCK_SIZE);
-    let mut delta_cache: HashMap<u64, DeltaCacheEntry> = HashMap::new();
-
-    // Progress bar
-    let progress = ProgressBar::new(total_objects as u64);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("  Parsing [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) [{elapsed_precise}] {msg}")
-            .expect("valid template")
-            .progress_chars("#>-"),
-    );
-
-    // The pack trailer is a SHA-1 checksum of everything before it.
-    let pack_end = (pack_mmap.len() - 20) as u64;
-    let offsets: Vec<u64> = index.entries.iter().map(|e| e.offset).collect();
-    let disk_sizes = disk_sizes(&offsets, pack_end);
-
-    let mut parsed = 0u64;
-    let mut skipped_blobs = 0u64;
-    let mut type_counts: [u64; 8] = [0; 8];
-
-    // Parse each object in the pack
-    for (entry, &size_disk) in index.entries.iter().zip(&disk_sizes) {
-        // Count raw object type (cheap - just read the header byte)
-        let offset = entry.offset as usize;
-        if offset < pack_mmap.len() {
-            let raw_type = (pack_mmap[offset] >> 4) & 0x07;
-            type_counts[raw_type as usize] += 1;
-        }
-
-        // A failed object would silently drop every edge below it, so stop.
-        parse_pack_object(
-            &pack_mmap,
-            &index,
-            &hash_to_offset,
-            entry,
-            size_disk,
-            &mut delta_arena,
-            &mut delta_cache,
-            commits_raw,
-            trees_raw,
-            hash_index,
-            container,
-            &mut skipped_blobs,
-        )
-        .with_context(|| format!("Failed to parse object {}", hex::encode(entry.hash)))?;
-        parsed += 1;
-
-        progress.inc(1);
-
-        // Update message periodically
-        if parsed % 10000 == 0 {
-            progress.set_message(format!(
-                "C:{} T:{} B:{} t:{}",
-                container.commits.len(),
-                container.trees.len(),
-                container.blobs.len(),
-                container.tags.len(),
-            ));
-        }
-    }
-
-    progress.finish_with_message(format!(
-        "done - C:{} T:{} B:{} t:{} delta-cache:{} blob-skip:{}",
-        container.commits.len(),
-        container.trees.len(),
-        container.blobs.len(),
-        container.tags.len(),
-        delta_cache.len(),
-        skipped_blobs,
-    ));
-
-    // Print type breakdown
-    for (i, &count) in type_counts.iter().enumerate() {
-        if count > 0 {
-            println!("    {}: {}", type_name(i as u8), count);
-        }
-    }
-    println!(
-        "  Delta arena: {} blocks, {:.2} MB, {} cached entries",
-        delta_arena.block_count(),
-        delta_arena.total_bytes() as f64 / (1024.0 * 1024.0),
-        delta_cache.len(),
-    );
-    println!("  Pack parsed in {:?}", start.elapsed());
-
-    Ok(())
-}
-
 /// Verify the pack file header
-fn verify_pack_header(data: &[u8]) -> Result<()> {
+pub fn verify_pack_header(data: &[u8]) -> Result<()> {
     if data.len() < 12 {
         return Err(anyhow!("Pack file too small"));
     }
@@ -281,98 +109,142 @@ fn verify_pack_header(data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Parse a single object from the pack file
-fn parse_pack_object(
-    pack_data: &[u8],
-    index: &PackIndex,
-    hash_to_offset: &HashMap<ObjectHash, u64>,
-    entry: &PackIndexEntry,
-    size_disk: u64,
-    delta_arena: &mut DeltaArena,
-    delta_cache: &mut HashMap<u64, DeltaCacheEntry>,
-    commits_raw: &mut HashMap<ObjectHash, CommitRaw>,
-    trees_raw: &mut HashMap<ObjectHash, TreeRaw>,
-    hash_index: &mut HashIndex,
-    container: &mut ObjectContainer,
-    skipped_blobs: &mut u64,
-) -> Result<()> {
-    // Packs can overlap; the first copy parsed is the one recorded.
-    if hash_index.contains(&entry.hash) {
-        return Ok(());
-    }
+/// Inflates entries of one pack, keeping resolved delta bases in an arena
+/// so a chain is only walked once. Entries read in offset order get the
+/// best reuse, since an OFS delta's base always precedes it.
+pub struct PackReader<'a> {
+    data: &'a [u8],
+    index: &'a PackIndex,
+    arena: DeltaArena,
+    cache: HashMap<u64, DeltaCacheEntry>,
+}
 
-    let offset = entry.offset as usize;
-    let (obj_type, obj_size, header_len) = parse_object_header(&pack_data[offset..])?;
-
-    let data_start = offset + header_len;
-
-    let delta = match obj_type {
-        OBJ_OFS_DELTA | OBJ_REF_DELTA => Some(delta_base(
-            pack_data,
-            hash_to_offset,
-            offset,
-            obj_type,
-            data_start,
-        )?),
-        _ => None,
-    };
-
-    // A delta's header size is the size of the delta, not of the object. The
-    // object's size is in the delta's own header, and its type is the type
-    // at the end of the base chain.
-    let (final_type, size) = match delta {
-        Some((base_offset, payload_start)) => (
-            resolved_type(pack_data, hash_to_offset, base_offset)?,
-            delta_result_size(&pack_data[payload_start..])?,
-        ),
-        None => (obj_type, obj_size),
-    };
-
-    // Blob content is never needed, so blobs are never inflated
-    if final_type == OBJ_BLOB {
-        let index_val = container.blobs.len();
-        container
-            .blobs
-            .push(Blob::new(index_val, entry.hash, size, size_disk));
-        hash_index.blobs.insert(entry.hash, index_val);
-        *skipped_blobs += 1;
-        return Ok(());
-    }
-
-    let obj_data = match delta {
-        Some((base_offset, payload_start)) => {
-            let delta_data = decompress_data(&pack_data[payload_start..])?;
-            let (_, base_data) = resolve_object_at_offset(
-                pack_data,
-                index,
-                hash_to_offset,
-                base_offset as u64,
-                delta_arena,
-                delta_cache,
-                0,
-            )?;
-            apply_delta(&base_data, &delta_data)?
+impl<'a> PackReader<'a> {
+    pub fn new(data: &'a [u8], index: &'a PackIndex) -> Self {
+        Self {
+            data,
+            index,
+            arena: DeltaArena::new(ARENA_BLOCK_SIZE),
+            cache: HashMap::new(),
         }
-        None => decompress_data(&pack_data[data_start..])?,
-    };
+    }
 
-    store_object(
-        final_type,
-        size,
-        size_disk,
-        &obj_data,
-        &entry.hash,
-        commits_raw,
-        trees_raw,
-        hash_index,
-        container,
-    )
+    /// The inflated, delta-resolved content of the entry at `offset`
+    pub fn read(&mut self, offset: u64) -> Result<Vec<u8>> {
+        let offset = offset as usize;
+        let (obj_type, _, header_len) = parse_object_header(&self.data[offset..])?;
+        let data_start = offset + header_len;
+
+        match obj_type {
+            OBJ_OFS_DELTA | OBJ_REF_DELTA => {
+                let (base_offset, payload_start) =
+                    delta_base(self.data, self.index, offset, obj_type, data_start)?;
+                let delta = decompress_data(&self.data[payload_start..])?;
+                // Only bases are cached; the result itself is returned once.
+                let (_, base) = resolve_object_at_offset(
+                    self.data,
+                    self.index,
+                    base_offset as u64,
+                    &mut self.arena,
+                    &mut self.cache,
+                    0,
+                )?;
+                apply_delta(&base, &delta)
+            }
+            _ => decompress_data(&self.data[data_start..]),
+        }
+    }
+
+    /// (cached bases, arena blocks, arena bytes)
+    pub fn cache_stats(&self) -> (usize, usize, usize) {
+        (
+            self.cache.len(),
+            self.arena.block_count(),
+            self.arena.total_bytes(),
+        )
+    }
+}
+
+/// One pack entry as found by reading headers only, without inflating bodies
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannedEntry {
+    pub hash: ObjectHash,
+    /// Byte offset of the entry in the pack
+    pub offset: u64,
+    /// Bytes the entry occupies on disk, up to the next entry or the trailer
+    pub size_disk: u64,
+    /// Kind of the object; for a delta, the kind at the end of its base chain
+    pub kind: ObjectKind,
+    /// Inflated size of the object; for a delta, the size the delta produces
+    pub size: u64,
+    pub is_delta: bool,
+}
+
+/// Read every entry's header in offset order, so the pack is touched
+/// sequentially from front to back. Nothing is inflated except the first
+/// few bytes of each delta, which hold the result size.
+///
+/// Scanning in offset order also means an OFS delta's base has always been
+/// seen already, so its kind is a lookup rather than a walk up the chain.
+pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<Vec<ScannedEntry>> {
+    if pack_data.len() < 12 + 20 {
+        return Err(anyhow!("Pack file too small"));
+    }
+    let pack_end = (pack_data.len() - 20) as u64;
+
+    let mut order: Vec<usize> = (0..index.entries.len()).collect();
+    order.sort_unstable_by_key(|&i| index.entries[i].offset);
+    let offsets: Vec<u64> = order.iter().map(|&i| index.entries[i].offset).collect();
+
+    // Kind of each entry in `order`, filled as the scan proceeds
+    let mut kinds: Vec<Option<ObjectKind>> = vec![None; order.len()];
+    let mut entries = Vec::with_capacity(order.len());
+
+    for (pos, &i) in order.iter().enumerate() {
+        let entry = &index.entries[i];
+        let offset = entry.offset as usize;
+        let (obj_type, obj_size, header_len) = parse_object_header(&pack_data[offset..])?;
+        let data_start = offset + header_len;
+        let size_disk = offsets.get(pos + 1).copied().unwrap_or(pack_end) - entry.offset;
+
+        let (kind, size, is_delta) = match obj_type {
+            OBJ_OFS_DELTA | OBJ_REF_DELTA => {
+                let (base_offset, payload_start) =
+                    delta_base(pack_data, index, offset, obj_type, data_start)?;
+                let kind = match offsets.binary_search(&(base_offset as u64)) {
+                    Ok(p) if kinds[p].is_some() => kinds[p].unwrap(),
+                    // A REF delta may point forward to a base not yet scanned
+                    _ => pack_kind(resolved_type(pack_data, index, base_offset)?)?,
+                };
+                (kind, delta_result_size(&pack_data[payload_start..])?, true)
+            }
+            _ => (pack_kind(obj_type)?, obj_size, false),
+        };
+
+        kinds[pos] = Some(kind);
+        entries.push(ScannedEntry {
+            hash: entry.hash,
+            offset: entry.offset,
+            size_disk,
+            kind,
+            size,
+            is_delta,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Kind for a non-delta pack type code
+fn pack_kind(obj_type: u8) -> Result<ObjectKind> {
+    ObjectKind::from_pack_type(obj_type)
+        .ok_or_else(|| ParseError::InvalidObjectType(obj_type).into())
 }
 
 /// Locate a delta's base object and the start of its zlib-compressed payload
 fn delta_base(
     pack_data: &[u8],
-    hash_to_offset: &HashMap<ObjectHash, u64>,
+    index: &PackIndex,
     offset: usize,
     obj_type: u8,
     data_start: usize,
@@ -382,32 +254,22 @@ fn delta_base(
         Ok((offset - relative, data_start + header_len))
     } else {
         let base_hash: ObjectHash = pack_data[data_start..data_start + 20].try_into()?;
-        let base_offset = hash_to_offset
-            .get(&base_hash)
+        let base_offset = index
+            .offset_of(&base_hash)
             .ok_or_else(|| ParseError::ObjectNotFound(hex::encode(base_hash)))?;
-        Ok((*base_offset as usize, data_start + 20))
+        Ok((base_offset as usize, data_start + 20))
     }
 }
 
 /// Type of the object at the end of a delta chain, found by following base
 /// pointers through object headers without inflating anything
-fn resolved_type(
-    pack_data: &[u8],
-    hash_to_offset: &HashMap<ObjectHash, u64>,
-    mut offset: usize,
-) -> Result<u8> {
+fn resolved_type(pack_data: &[u8], index: &PackIndex, mut offset: usize) -> Result<u8> {
     for _ in 0..=MAX_DELTA_DEPTH {
         let (obj_type, _, header_len) = parse_object_header(&pack_data[offset..])?;
         if obj_type != OBJ_OFS_DELTA && obj_type != OBJ_REF_DELTA {
             return Ok(obj_type);
         }
-        (offset, _) = delta_base(
-            pack_data,
-            hash_to_offset,
-            offset,
-            obj_type,
-            offset + header_len,
-        )?;
+        (offset, _) = delta_base(pack_data, index, offset, obj_type, offset + header_len)?;
     }
     Err(anyhow!(
         "Delta chain too deep (>{}) at offset {}",
@@ -436,20 +298,6 @@ fn delta_result_size(compressed: &[u8]) -> Result<u64> {
     let (_, base_len) = read_varint(&prefix[..len])?;
     let (size, _) = read_varint(&prefix[base_len..len])?;
     Ok(size)
-}
-
-/// On-disk size of each object: the distance from its offset to the next
-/// object's offset, or to `pack_end` for the last one
-fn disk_sizes(offsets: &[u64], pack_end: u64) -> Vec<u64> {
-    let mut sorted = offsets.to_vec();
-    sorted.sort_unstable();
-    offsets
-        .iter()
-        .map(|&offset| {
-            let next = sorted.partition_point(|&o| o <= offset);
-            sorted.get(next).copied().unwrap_or(pack_end) - offset
-        })
-        .collect()
 }
 
 /// Parse the variable-length object header
@@ -503,7 +351,6 @@ fn decompress_data(data: &[u8]) -> Result<Vec<u8>> {
 fn resolve_object_at_offset(
     pack_data: &[u8],
     index: &PackIndex,
-    hash_to_offset: &HashMap<ObjectHash, u64>,
     offset: u64,
     delta_arena: &mut DeltaArena,
     delta_cache: &mut HashMap<u64, DeltaCacheEntry>,
@@ -537,7 +384,6 @@ fn resolve_object_at_offset(
             let base_data = resolve_object_at_offset(
                 pack_data,
                 index,
-                hash_to_offset,
                 abs_base_offset as u64,
                 delta_arena,
                 delta_cache,
@@ -550,15 +396,14 @@ fn resolve_object_at_offset(
             let base_hash: ObjectHash = pack_data[data_start..data_start + 20].try_into()?;
             let delta_data = decompress_data(&pack_data[data_start + 20..])?;
 
-            let base_offset = hash_to_offset
-                .get(&base_hash)
+            let base_offset = index
+                .offset_of(&base_hash)
                 .ok_or_else(|| ParseError::ObjectNotFound(hex::encode(base_hash)))?;
 
             let base_data = resolve_object_at_offset(
                 pack_data,
                 index,
-                hash_to_offset,
-                *base_offset,
+                base_offset,
                 delta_arena,
                 delta_cache,
                 depth + 1,
@@ -689,82 +534,37 @@ fn read_varint(data: &[u8]) -> Result<(u64, usize)> {
     Ok((value, pos))
 }
 
-/// Store a parsed object in the appropriate container
-fn store_object(
-    obj_type: u8,
-    size: u64,
-    size_disk: u64,
-    data: &[u8],
-    hash: &ObjectHash,
-    commits_raw: &mut HashMap<ObjectHash, CommitRaw>,
-    trees_raw: &mut HashMap<ObjectHash, TreeRaw>,
-    hash_index: &mut HashIndex,
-    container: &mut ObjectContainer,
-) -> Result<()> {
-    match obj_type {
-        OBJ_COMMIT => {
-            let index = container.commits.len();
-            container.commits.push(Commit::new(index, *hash, size, size_disk));
-            hash_index.commits.insert(*hash, index);
-
-            let raw = parse_commit(data, index)?;
-            commits_raw.insert(*hash, raw);
-        }
-        OBJ_TREE => {
-            let index = container.trees.len();
-            container.trees.push(Tree::new(index, *hash, size, size_disk));
-            hash_index.trees.insert(*hash, index);
-
-            let entries = parse_tree(data)?;
-            trees_raw.insert(*hash, TreeRaw { index, entries });
-        }
-        OBJ_BLOB => {
-            let index = container.blobs.len();
-            container.blobs.push(Blob::new(index, *hash, size, size_disk));
-            hash_index.blobs.insert(*hash, index);
-        }
-        OBJ_TAG => {
-            let index = container.tags.len();
-            let raw = parse_tag(data)?;
-            container
-                .tags
-                .push(Tag::new(index, *hash, size, size_disk, raw.name, raw.target));
-            hash_index.tags.insert(*hash, index);
-        }
-        _ => {
-            debug!("Ignoring unknown object type: {}", obj_type);
-        }
-    }
-
-    Ok(())
+/// Pack index structure. Entries are in hash order, as the `.idx` format
+/// stores them, so hashes can be looked up by binary search.
+pub struct PackIndex {
+    pub entries: Vec<PackIndexEntry>,
 }
 
-/// Pack index structure
-struct PackIndex {
-    entries: Vec<PackIndexEntry>,
+impl PackIndex {
+    /// Offset of the entry with this hash, if the pack has one
+    fn offset_of(&self, hash: &ObjectHash) -> Option<u64> {
+        self.entries
+            .binary_search_by(|e| e.hash.cmp(hash))
+            .ok()
+            .map(|i| self.entries[i].offset)
+    }
 }
 
 /// Single entry in a pack index
-struct PackIndexEntry {
-    hash: ObjectHash,
-    offset: u64,
-    crc32: u32,
+pub struct PackIndexEntry {
+    pub hash: ObjectHash,
+    pub offset: u64,
+    #[allow(dead_code)]
+    pub crc32: u32,
 }
 
 impl PackIndex {
     /// Parse a pack index file (version 2 format)
-    fn parse(path: &Path) -> Result<Self> {
-        let start = Instant::now();
+    pub fn parse(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
         let mut data = Vec::new();
         reader.read_to_end(&mut data)?;
-
-        println!(
-            "  Reading index: {} ({:.2} MB)",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            data.len() as f64 / (1024.0 * 1024.0)
-        );
 
         if data.len() < 8 {
             return Err(anyhow!("Index file too small"));
@@ -785,8 +585,6 @@ impl PackIndex {
         let fanout_end = 8 + 256 * 4;
         let total_objects =
             u32::from_be_bytes(data[fanout_end - 4..fanout_end].try_into()?) as usize;
-
-        println!("  Index contains {} objects", total_objects);
 
         // Parse SHA-1 table
         let sha_start = fanout_end;
@@ -831,8 +629,6 @@ impl PackIndex {
             entries.push(PackIndexEntry { hash, offset, crc32 });
         }
 
-        println!("  Index parsed in {:?}", start.elapsed());
-
         Ok(Self { entries })
     }
 }
@@ -855,6 +651,7 @@ mod tests {
     use flate2::Compression;
 
     use super::*;
+    use crate::models::ObjectKind;
 
     fn zlib(data: &[u8]) -> Vec<u8> {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -862,10 +659,258 @@ mod tests {
         encoder.finish().unwrap()
     }
 
+    /// `<type><size>` object header: 3-bit type and 4 bits of size in the
+    /// first byte, 7 bits of size per continuation byte
+    fn obj_header(kind: u8, mut size: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut byte = (kind << 4) | (size & 0x0f) as u8;
+        size >>= 4;
+        while size > 0 {
+            out.push(byte | 0x80);
+            byte = (size & 0x7f) as u8;
+            size >>= 7;
+        }
+        out.push(byte);
+        out
+    }
+
+    /// OFS_DELTA base distance, big-endian 7-bit groups with git's "+1 per
+    /// byte" bias (the inverse of `parse_ofs_delta_header`)
+    fn ofs_encode(mut distance: u64) -> Vec<u8> {
+        let mut buf = [0u8; 10];
+        let mut pos = buf.len() - 1;
+        buf[pos] = (distance & 0x7f) as u8;
+        distance >>= 7;
+        while distance > 0 {
+            distance -= 1;
+            pos -= 1;
+            buf[pos] = 0x80 | (distance & 0x7f) as u8;
+            distance >>= 7;
+        }
+        buf[pos..].to_vec()
+    }
+
+    fn varint(mut value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// A delta that ignores its base and inserts `result` wholesale
+    fn insert_delta(base_size: u64, result: &[u8]) -> Vec<u8> {
+        let mut delta = varint(base_size);
+        delta.extend(varint(result.len() as u64));
+        for chunk in result.chunks(127) {
+            delta.push(chunk.len() as u8);
+            delta.extend_from_slice(chunk);
+        }
+        delta
+    }
+
+    /// Writes a version 2 pack and its index in memory
+    struct PackBuilder {
+        data: Vec<u8>,
+        entries: Vec<PackIndexEntry>,
+    }
+
+    impl PackBuilder {
+        fn new() -> Self {
+            let mut data = b"PACK".to_vec();
+            data.extend_from_slice(&2u32.to_be_bytes());
+            data.extend_from_slice(&0u32.to_be_bytes()); // count, patched in finish()
+            Self {
+                data,
+                entries: Vec::new(),
+            }
+        }
+
+        fn push(&mut self, hash: ObjectHash, bytes: &[u8]) -> u64 {
+            let offset = self.data.len() as u64;
+            self.data.extend_from_slice(bytes);
+            self.entries.push(PackIndexEntry {
+                hash,
+                offset,
+                crc32: 0,
+            });
+            offset
+        }
+
+        /// A whole (non-delta) object
+        fn add(&mut self, hash: ObjectHash, kind: u8, body: &[u8]) -> u64 {
+            let mut bytes = obj_header(kind, body.len() as u64);
+            bytes.extend(zlib(body));
+            self.push(hash, &bytes)
+        }
+
+        /// A whole object whose payload is not valid zlib
+        fn add_corrupt(&mut self, hash: ObjectHash, kind: u8, size: u64) -> u64 {
+            let mut bytes = obj_header(kind, size);
+            bytes.extend_from_slice(b"\xff\xff\xffnot zlib");
+            self.push(hash, &bytes)
+        }
+
+        fn add_ofs_delta(&mut self, hash: ObjectHash, base_offset: u64, result: &[u8]) -> u64 {
+            let delta = insert_delta(1, result);
+            let offset = self.data.len() as u64;
+            let mut bytes = obj_header(OBJ_OFS_DELTA, delta.len() as u64);
+            bytes.extend(ofs_encode(offset - base_offset));
+            bytes.extend(zlib(&delta));
+            self.push(hash, &bytes)
+        }
+
+        fn add_ref_delta(&mut self, hash: ObjectHash, base: ObjectHash, result: &[u8]) -> u64 {
+            let delta = insert_delta(1, result);
+            let mut bytes = obj_header(OBJ_REF_DELTA, delta.len() as u64);
+            bytes.extend_from_slice(&base);
+            bytes.extend(zlib(&delta));
+            self.push(hash, &bytes)
+        }
+
+        /// Pack bytes (with a dummy 20-byte trailer) and a hash-sorted index
+        fn finish(mut self) -> (Vec<u8>, PackIndex) {
+            let count = self.entries.len() as u32;
+            self.data[8..12].copy_from_slice(&count.to_be_bytes());
+            self.data.extend_from_slice(&[0u8; 20]);
+            self.entries.sort_by_key(|e| e.hash);
+            (
+                self.data,
+                PackIndex {
+                    entries: self.entries,
+                },
+            )
+        }
+    }
+
     #[test]
-    fn disk_sizes_measure_to_next_offset_in_pack_order() {
-        // Index entries are in hash order, not offset order.
-        assert_eq!(disk_sizes(&[100, 12, 40], 150), vec![50, 28, 60]);
+    fn scan_pack_returns_entries_in_offset_order_with_disk_sizes() {
+        let mut pack = PackBuilder::new();
+        // Hash order (1, 5, 9) deliberately differs from offset order (9, 1, 5)
+        let o_blob = pack.add([9; 20], OBJ_BLOB, b"hello");
+        let o_tree = pack.add([1; 20], OBJ_TREE, b"100644 f\0aaaaaaaaaaaaaaaaaaaa");
+        let o_commit = pack.add([5; 20], OBJ_COMMIT, b"tree x\n");
+        let (data, index) = pack.finish();
+        let pack_end = (data.len() - 20) as u64;
+
+        let entries = scan_pack(&data, &index).unwrap();
+
+        let offsets: Vec<u64> = entries.iter().map(|e| e.offset).collect();
+        assert_eq!(offsets, vec![o_blob, o_tree, o_commit]);
+        let hashes: Vec<ObjectHash> = entries.iter().map(|e| e.hash).collect();
+        assert_eq!(hashes, vec![[9; 20], [1; 20], [5; 20]]);
+
+        let kinds: Vec<ObjectKind> = entries.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![ObjectKind::Blob, ObjectKind::Tree, ObjectKind::Commit]
+        );
+        let sizes: Vec<u64> = entries.iter().map(|e| e.size).collect();
+        assert_eq!(sizes, vec![5, 29, 7]);
+        assert!(entries.iter().all(|e| !e.is_delta));
+
+        let disk: Vec<u64> = entries.iter().map(|e| e.size_disk).collect();
+        assert_eq!(
+            disk,
+            vec![o_tree - o_blob, o_commit - o_tree, pack_end - o_commit]
+        );
+    }
+
+    #[test]
+    fn scan_pack_resolves_delta_kinds_and_sizes_through_chains() {
+        let mut pack = PackBuilder::new();
+        let o_base = pack.add([1; 20], OBJ_BLOB, b"base blob");
+        // OFS delta on the blob, and an OFS delta on that delta (depth 2)
+        let o_d1 = pack.add_ofs_delta([2; 20], o_base, &[b'x'; 300]);
+        let o_d2 = pack.add_ofs_delta([3; 20], o_d1, &[b'y'; 40]);
+        // REF delta whose base comes later in the pack (forward reference)
+        let o_ref = pack.add_ref_delta([4; 20], [6; 20], b"tree later\n");
+        let o_commit = pack.add([6; 20], OBJ_COMMIT, b"tree ...\n");
+        let (data, index) = pack.finish();
+
+        let entries = scan_pack(&data, &index).unwrap();
+
+        let by_offset = |o: u64| entries.iter().find(|e| e.offset == o).unwrap();
+        let base = by_offset(o_base);
+        assert_eq!(
+            (base.kind, base.size, base.is_delta),
+            (ObjectKind::Blob, 9, false)
+        );
+        let d1 = by_offset(o_d1);
+        assert_eq!(
+            (d1.kind, d1.size, d1.is_delta),
+            (ObjectKind::Blob, 300, true)
+        );
+        let d2 = by_offset(o_d2);
+        assert_eq!(
+            (d2.kind, d2.size, d2.is_delta),
+            (ObjectKind::Blob, 40, true)
+        );
+        let r = by_offset(o_ref);
+        assert_eq!((r.kind, r.size, r.is_delta), (ObjectKind::Commit, 11, true));
+        let c = by_offset(o_commit);
+        assert_eq!((c.kind, c.size, c.is_delta), (ObjectKind::Commit, 9, false));
+    }
+
+    #[test]
+    fn pack_reader_inflates_whole_objects_and_resolves_delta_chains() {
+        let mut pack = PackBuilder::new();
+        let o_base = pack.add([1; 20], OBJ_TREE, b"base tree");
+        let o_d1 = pack.add_ofs_delta([2; 20], o_base, b"first delta result");
+        let o_d2 = pack.add_ofs_delta([3; 20], o_d1, b"second, on the first");
+        let o_ref = pack.add_ref_delta([4; 20], [1; 20], b"ref delta result");
+        let (data, index) = pack.finish();
+
+        let mut reader = PackReader::new(&data, &index);
+
+        assert_eq!(reader.read(o_base).unwrap(), b"base tree");
+        assert_eq!(reader.read(o_d1).unwrap(), b"first delta result");
+        assert_eq!(reader.read(o_d2).unwrap(), b"second, on the first");
+        assert_eq!(reader.read(o_ref).unwrap(), b"ref delta result");
+        // Only bases are cached: the base tree and the first delta
+        assert_eq!(reader.cache_stats().0, 2);
+    }
+
+    #[test]
+    fn scan_pack_does_not_inflate_whole_objects() {
+        let mut pack = PackBuilder::new();
+        pack.add_corrupt([1; 20], OBJ_BLOB, 123_456);
+        pack.add_corrupt([2; 20], OBJ_TREE, 77);
+        let (data, index) = pack.finish();
+
+        let entries = scan_pack(&data, &index).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].size, 123_456);
+        assert_eq!(entries[1].size, 77);
+    }
+
+    #[test]
+    fn scan_pack_rejects_ref_delta_with_missing_base() {
+        let mut pack = PackBuilder::new();
+        pack.add_ref_delta([1; 20], [0xee; 20], b"orphan");
+        let (data, index) = pack.finish();
+
+        let err = scan_pack(&data, &index).unwrap_err().to_string();
+
+        assert!(err.contains("eeeeeeee"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn pack_index_offset_of_uses_hash_order() {
+        let mut pack = PackBuilder::new();
+        let o9 = pack.add([9; 20], OBJ_BLOB, b"a");
+        let o1 = pack.add([1; 20], OBJ_BLOB, b"b");
+        let (_, index) = pack.finish();
+
+        assert_eq!(index.offset_of(&[1; 20]), Some(o1));
+        assert_eq!(index.offset_of(&[9; 20]), Some(o9));
+        assert_eq!(index.offset_of(&[5; 20]), None);
     }
 
     #[test]

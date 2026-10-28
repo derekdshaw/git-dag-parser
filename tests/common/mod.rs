@@ -149,6 +149,17 @@ impl Repo {
         repo
     }
 
+    /// `with_history` plus one blob that nothing references, then repacked
+    /// so the unreachable blob goes into a cruft pack. The blob's content is
+    /// in the untracked file `dangling.txt`.
+    pub fn with_cruft_pack() -> Self {
+        let repo = Self::with_history();
+        repo.write("dangling.txt", "nothing points at this blob\n");
+        repo.git(&["hash-object", "-w", "dangling.txt"]);
+        repo.git(&["repack", "--cruft", "-d", "-q"]);
+        repo
+    }
+
     pub fn git_dir(&self) -> PathBuf {
         self.work.join(".git")
     }
@@ -310,7 +321,62 @@ impl Repo {
             .sum()
     }
 
-    fn pack_files(&self, ext: &str) -> Vec<PathBuf> {
+    /// Object count of every pack index, keyed by `.pack` file name, read
+    /// from the last fanout entry of the `.idx`
+    pub fn pack_object_counts(&self) -> HashMap<String, usize> {
+        self.pack_files("idx")
+            .into_iter()
+            .map(|idx| {
+                let data = fs::read(&idx).unwrap();
+                let fanout_end = 8 + 256 * 4;
+                let count =
+                    u32::from_be_bytes(data[fanout_end - 4..fanout_end].try_into().unwrap());
+                let name = idx
+                    .with_extension("pack")
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                (name, count as usize)
+            })
+            .collect()
+    }
+
+    /// Number of loose object files under `objects/xx/`
+    pub fn loose_object_count(&self) -> usize {
+        fs::read_dir(self.git_dir().join("objects"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.is_dir() && p.file_name().unwrap().len() == 2)
+            .map(|d| fs::read_dir(d).unwrap().count())
+            .sum()
+    }
+
+    /// Every pack entry as `git verify-pack -v` reports it, keyed by
+    /// (pack file name, offset), with the hash and the size in the pack
+    pub fn verify_pack_entries(&self) -> HashMap<(String, u64), (String, u64)> {
+        let mut entries = HashMap::new();
+        for idx in self.pack_files("idx") {
+            let pack_name = idx
+                .with_extension("pack")
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let out = self.git(&["verify-pack", "-v", idx.to_str().unwrap()]);
+            for line in String::from_utf8(out).unwrap().lines() {
+                // <hash> <type> <size> <size-in-pack> <offset> [<depth> <base>]
+                let f: Vec<&str> = line.split_whitespace().collect();
+                if f.len() >= 5 && f[0].len() == 40 {
+                    let key = (pack_name.clone(), f[4].parse().unwrap());
+                    entries.insert(key, (f[0].to_string(), f[3].parse().unwrap()));
+                }
+            }
+        }
+        entries
+    }
+
+    pub fn pack_files(&self, ext: &str) -> Vec<PathBuf> {
         fs::read_dir(self.git_dir().join("objects/pack"))
             .unwrap()
             .map(|e| e.unwrap().path())
