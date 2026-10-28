@@ -133,6 +133,48 @@ pub fn hex_to_hash(hex: &[u8]) -> Result<ObjectHash> {
     Ok(hash)
 }
 
+#[cfg(feature = "bench")]
+pub(crate) mod benches {
+    use divan::counter::BytesCount;
+    use divan::{black_box, Bencher};
+
+    /// A tree body with `entries` regular files, like one large directory.
+    /// Each entry is 42 bytes: `100644 file_NNNNNN.rs\0` and a 20-byte hash.
+    pub(crate) fn synthetic_tree(entries: usize) -> Vec<u8> {
+        let mut body = Vec::with_capacity(entries * 42);
+        for i in 0..entries {
+            body.extend_from_slice(format!("100644 file_{i:06}.rs\0").as_bytes());
+            let mut hash = [0u8; 20];
+            hash[..8]
+                .copy_from_slice(&(i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes());
+            body.extend_from_slice(&hash);
+        }
+        body
+    }
+
+    // 84,000 entries is about the size of the largest directory in a large
+    // monorepo measured during development.
+    #[divan::bench(args = [100, 1_000, 84_000])]
+    fn parse_tree(bencher: Bencher, entries: usize) {
+        let body = synthetic_tree(entries);
+        bencher
+            .counter(BytesCount::of_slice(&body))
+            .bench_local(|| super::parse_tree(black_box(&body)).unwrap());
+    }
+
+    #[divan::bench]
+    fn parse_commit(bencher: Bencher) {
+        let body = b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n\
+            parent 0123456789abcdef0123456789abcdef01234567\n\
+            parent 89abcdef0123456789abcdef0123456789abcdef\n\
+            author A U Thor <author@example.com> 1700000000 +0000\n\
+            committer C O Mitter <committer@example.com> 1700000100 +0000\n\
+            \n\
+            Merge branch 'feature'\n";
+        bencher.bench_local(|| super::parse_commit(black_box(body), 0).unwrap());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

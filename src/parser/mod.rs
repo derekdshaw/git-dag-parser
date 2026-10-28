@@ -156,3 +156,25 @@ fn build_static_relationships(
         }
     }
 }
+
+#[cfg(feature = "bench")]
+mod benches {
+    use std::path::Path;
+
+    /// A full parse of a real repository. Ignored by default because it
+    /// needs a repository and takes seconds per run:
+    ///
+    /// `GDP_BENCH_REPO=~/perfrepos/zed cargo bench --features bench --bench parser -- --include-ignored parse_objects_repo`
+    #[divan::bench(ignore, sample_count = 3, sample_size = 1)]
+    fn parse_objects_repo() -> super::ParsedObjects {
+        let repo =
+            std::env::var("GDP_BENCH_REPO").expect("set GDP_BENCH_REPO to a repository path");
+        let path = Path::new(&repo);
+        let git_dir = if path.join(".git").is_dir() {
+            path.join(".git")
+        } else {
+            path.to_path_buf()
+        };
+        super::parse_objects(&git_dir).expect("parse_objects failed")
+    }
+}

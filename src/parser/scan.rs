@@ -442,6 +442,64 @@ fn list_loose_objects(objects_dir: &Path) -> Result<Vec<(ObjectHash, PathBuf)>> 
     Ok(found)
 }
 
+#[cfg(feature = "bench")]
+mod benches {
+    use divan::counter::ItemsCount;
+    use divan::Bencher;
+
+    use super::{Scan, ScannedCopy};
+    use crate::models::{ObjectKind, Pack};
+
+    /// `n` distinct objects in one pack, arriving in pseudo-random hash
+    /// order as they do in offset order: 10% commits, 40% trees, 50% blobs
+    fn copies(n: usize) -> Vec<ScannedCopy> {
+        (0..n)
+            .map(|i| {
+                let mut hash = [0u8; 20];
+                hash[..8]
+                    .copy_from_slice(&(i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).to_be_bytes());
+                let kind = match i % 10 {
+                    0 => ObjectKind::Commit,
+                    1..=4 => ObjectKind::Tree,
+                    _ => ObjectKind::Blob,
+                };
+                ScannedCopy {
+                    hash,
+                    kind,
+                    size: 200,
+                    pack: Some(0),
+                    offset: 12 + 100 * i as u64,
+                    size_disk: 100,
+                    is_delta: i % 2 == 0,
+                    mtime: 1_700_000_000,
+                }
+            })
+            .collect()
+    }
+
+    /// Pass 1 bookkeeping: record every copy, then sort each kind by hash
+    #[divan::bench(args = [100_000])]
+    fn record_and_finish(bencher: Bencher, n: usize) {
+        let copies = copies(n);
+        let packs = vec![Pack::new(
+            0,
+            "pack-a.pack".to_string(),
+            1 << 30,
+            1_700_000_000,
+        )];
+        bencher
+            .counter(ItemsCount::new(n))
+            .with_inputs(|| Scan::new(packs.clone(), n))
+            .bench_local_values(|mut scan| {
+                for copy in &copies {
+                    scan.record(*copy);
+                }
+                scan.finish();
+                scan
+            });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

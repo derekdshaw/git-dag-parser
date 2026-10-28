@@ -642,6 +642,126 @@ mod hex {
     }
 }
 
+#[cfg(feature = "bench")]
+mod benches {
+    use std::io::Write;
+
+    use divan::counter::{BytesCount, ItemsCount};
+    use divan::{black_box, Bencher};
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+
+    use crate::parser::content::benches::synthetic_tree;
+
+    /// Bytes of one entry in `synthetic_tree`
+    const ENTRY_BYTES: usize = 42;
+    /// Entry inserted by `edit_delta`
+    const NEW_ENTRY: &[u8] = b"100644 new_file.rs\0";
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// Size varint as used at the start of a delta: low 7 bits first
+    fn size_varint(mut value: u64, out: &mut Vec<u8>) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// Copy instruction: only the non-zero offset and size bytes are written
+    fn copy(out: &mut Vec<u8>, offset: usize, size: usize) {
+        let mut cmd = 0x80u8;
+        let mut args = Vec::new();
+        for i in 0..4 {
+            let byte = (offset >> (8 * i)) as u8;
+            if byte != 0 {
+                cmd |= 1 << i;
+                args.push(byte);
+            }
+        }
+        for i in 0..3 {
+            let byte = (size >> (8 * i)) as u8;
+            if byte != 0 {
+                cmd |= 0x10 << i;
+                args.push(byte);
+            }
+        }
+        out.push(cmd);
+        out.extend_from_slice(&args);
+    }
+
+    /// A delta that rebuilds `base` with one new entry in the middle, the
+    /// common shape of a tree delta. Returns the delta and the result.
+    fn edit_delta(base: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let half = base.len() / 2;
+        let mut result = base[..half].to_vec();
+        result.extend_from_slice(NEW_ENTRY);
+        result.extend_from_slice(&base[half..]);
+
+        let mut delta = Vec::new();
+        size_varint(base.len() as u64, &mut delta);
+        size_varint(result.len() as u64, &mut delta);
+        copy(&mut delta, 0, half);
+        delta.push(NEW_ENTRY.len() as u8);
+        delta.extend_from_slice(NEW_ENTRY);
+        copy(&mut delta, half, base.len() - half);
+        (delta, result)
+    }
+
+    /// Pass 1 reads the result size of every delta: 1,000 compressed deltas
+    /// against bases of 20 to 219 entries.
+    #[divan::bench]
+    fn delta_result_size_1000(bencher: Bencher) {
+        let deltas: Vec<(Vec<u8>, u64)> = (0..1000)
+            .map(|i| {
+                let (delta, result) = edit_delta(&synthetic_tree(20 + i % 200));
+                (zlib(&delta), result.len() as u64)
+            })
+            .collect();
+        for (compressed, size) in &deltas {
+            assert_eq!(super::delta_result_size(compressed).unwrap(), *size);
+        }
+        bencher
+            .counter(ItemsCount::new(deltas.len()))
+            .bench_local(|| {
+                for (compressed, _) in &deltas {
+                    black_box(super::delta_result_size(black_box(compressed)).unwrap());
+                }
+            });
+    }
+
+    /// Pass 2 inflates every tree body
+    #[divan::bench(args = [4 * 1024, 64 * 1024, 1024 * 1024])]
+    fn decompress_data(bencher: Bencher, bytes: usize) {
+        let body = synthetic_tree(bytes / ENTRY_BYTES);
+        let compressed = zlib(&body);
+        assert_eq!(super::decompress_data(&compressed).unwrap(), body);
+        bencher
+            .counter(BytesCount::of_slice(&body))
+            .bench_local(|| super::decompress_data(black_box(&compressed)).unwrap());
+    }
+
+    /// Pass 2 rebuilds every deltified tree from its base
+    #[divan::bench(args = [4 * 1024, 64 * 1024, 1024 * 1024])]
+    fn apply_delta(bencher: Bencher, bytes: usize) {
+        let base = synthetic_tree(bytes / ENTRY_BYTES);
+        let (delta, result) = edit_delta(&base);
+        assert_eq!(super::apply_delta(&base, &delta).unwrap(), result);
+        bencher
+            .counter(BytesCount::of_slice(&result))
+            .bench_local(|| super::apply_delta(black_box(&base), black_box(&delta)).unwrap());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;

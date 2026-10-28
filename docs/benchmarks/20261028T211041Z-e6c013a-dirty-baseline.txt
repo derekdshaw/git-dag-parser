@@ -1,0 +1,187 @@
+# time_utc: 2026-10-28T21:10:41Z
+# commit: e6c013a
+# dirty: True
+# branch: main
+# rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
+# divan: 0.1.21
+# kernel: 6.6.87.2-microsoft-standard-WSL2
+# cpus: 128
+# label: baseline
+# divan_args: ['--include-ignored']
+
+git_dag_parser                      fastest       │ slowest       │ median        │ mean          │ samples │ iters
+╰─ parser                                         │               │               │               │         │
+   ├─ benches                                     │               │               │               │         │
+   │  ╰─ parse_objects_repo         Found 1 pack(s) with 286276 entries and 0 loose objects (14.911969ms)
+  Scanned pack-26bb49dc1c4cfdcdbf9ed89cfdc1dc60336820b1.pack (127.95 MB, 286276 entries) in 1.325021247s
+Pass 1 (headers): C:28780 T:164485 B:93010 t:1 from 286276 copies in 1.420917868s
+Pass 2 (bodies): 28780 commits, 164485 trees, 1 tags in 2.023849239s
+Resolved tree entry indices in 201.94496ms
+Built static relationships in 193.714331ms
+Found 1 pack(s) with 286276 entries and 0 loose objects (2.599365ms)
+  Scanned pack-26bb49dc1c4cfdcdbf9ed89cfdc1dc60336820b1.pack (127.95 MB, 286276 entries) in 1.24983439s
+Pass 1 (headers): C:28780 T:164485 B:93010 t:1 from 286276 copies in 1.316315757s
+Pass 2 (bodies): 28780 commits, 164485 trees, 1 tags in 1.541744041s
+Resolved tree entry indices in 202.91631ms
+Built static relationships in 200.290292ms
+Found 1 pack(s) with 286276 entries and 0 loose objects (2.546365ms)
+  Scanned pack-26bb49dc1c4cfdcdbf9ed89cfdc1dc60336820b1.pack (127.95 MB, 286276 entries) in 1.24319276s
+Pass 1 (headers): C:28780 T:164485 B:93010 t:1 from 286276 copies in 1.317186598s
+Pass 2 (bodies): 28780 commits, 164485 trees, 1 tags in 1.474580501s
+Resolved tree entry indices in 205.217202ms
+Built static relationships in 149.487725ms
+3.16 s        │ 3.867 s       │ 3.286 s       │ 3.437 s       │ 3       │ 3
+   │                                max alloc:    │               │               │               │         │
+   │                                  4162739     │ 4162740       │ 4162739       │ 4162739       │         │
+   │                                  549.1 MB    │ 549.1 MB      │ 549.1 MB      │ 549.1 MB      │         │
+   │                                alloc:        │               │               │               │         │
+   │                                  5628196     │ 5628197       │ 5628196       │ 5628196       │         │
+   │                                  35.69 GB    │ 35.69 GB      │ 35.69 GB      │ 35.69 GB      │         │
+   │                                dealloc:      │               │               │               │         │
+   │                                  1465469     │ 1465469       │ 1465469       │ 1465469       │         │
+   │                                  35.61 GB    │ 35.61 GB      │ 35.61 GB      │ 35.61 GB      │         │
+   │                                grow:         │               │               │               │         │
+   │                                  1235981     │ 1235981       │ 1235981       │ 1235981       │         │
+   │                                  443.9 MB    │ 443.9 MB      │ 443.9 MB      │ 443.9 MB      │         │
+   ├─ content                                     │               │               │               │         │
+   │  ╰─ benches                                  │               │               │               │         │
+   │     ├─ parse_commit            503.2 ns      │ 2.244 µs      │ 513.2 ns      │ 532.9 ns      │ 100     │ 100
+   │     │                          max alloc:    │               │               │               │         │
+   │     │                            1           │ 1             │ 1             │ 1             │         │
+   │     │                            80 B        │ 80 B          │ 80 B          │ 80 B          │         │
+   │     │                          alloc:        │               │               │               │         │
+   │     │                            1           │ 1             │ 1             │ 1             │         │
+   │     │                            80 B        │ 80 B          │ 80 B          │ 80 B          │         │
+   │     ╰─ parse_tree                            │               │               │               │         │
+   │        ├─ 100                  3.447 µs      │ 18 µs         │ 4.772 µs      │ 5.021 µs      │ 100     │ 100
+   │        │                       1.218 GB/s    │ 233.2 MB/s    │ 880.1 MB/s    │ 836.3 MB/s    │         │
+   │        │                       max alloc:    │               │               │               │         │
+   │        │                         101         │ 101           │ 101           │ 101           │         │
+   │        │                         9.592 KB    │ 9.592 KB      │ 9.592 KB      │ 9.592 KB      │         │
+   │        │                       alloc:        │               │               │               │         │
+   │        │                         101         │ 101           │ 101           │ 101           │         │
+   │        │                         1.656 KB    │ 1.656 KB      │ 1.656 KB      │ 1.656 KB      │         │
+   │        │                       grow:         │               │               │               │         │
+   │        │                         5           │ 5             │ 5             │ 5             │         │
+   │        │                         7.936 KB    │ 7.936 KB      │ 7.936 KB      │ 7.936 KB      │         │
+   │        ├─ 1000                 37.64 µs      │ 190.5 µs      │ 38.2 µs       │ 40.64 µs      │ 100     │ 100
+   │        │                       1.115 GB/s    │ 220.4 MB/s    │ 1.099 GB/s    │ 1.033 GB/s    │         │
+   │        │                       max alloc:    │               │               │               │         │
+   │        │                         1001        │ 1001          │ 1001          │ 1001          │         │
+   │        │                         79.53 KB    │ 79.53 KB      │ 79.53 KB      │ 79.53 KB      │         │
+   │        │                       alloc:        │               │               │               │         │
+   │        │                         1001        │ 1001          │ 1001          │ 1001          │         │
+   │        │                         14.25 KB    │ 14.25 KB      │ 14.25 KB      │ 14.25 KB      │         │
+   │        │                       grow:         │               │               │               │         │
+   │        │                         8           │ 8             │ 8             │ 8             │         │
+   │        │                         65.28 KB    │ 65.28 KB      │ 65.28 KB      │ 65.28 KB      │         │
+   │        ╰─ 84000                3.444 ms      │ 4.92 ms       │ 3.639 ms      │ 3.753 ms      │ 100     │ 100
+   │                                1.024 GB/s    │ 717 MB/s      │ 969.3 MB/s    │ 939.9 MB/s    │         │
+   │                                max alloc:    │               │               │               │         │
+   │                                  84001       │ 84001         │ 84001         │ 84001         │         │
+   │                                  9.564 MB    │ 9.564 MB      │ 9.564 MB      │ 9.564 MB      │         │
+   │                                alloc:        │               │               │               │         │
+   │                                  84001       │ 84001         │ 84001         │ 84001         │         │
+   │                                  1.176 MB    │ 1.176 MB      │ 1.176 MB      │ 1.176 MB      │         │
+   │                                grow:         │               │               │               │         │
+   │                                  15          │ 15            │ 15            │ 15            │         │
+   │                                  8.388 MB    │ 8.388 MB      │ 8.388 MB      │ 8.388 MB      │         │
+   ├─ pack                                        │               │               │               │         │
+   │  ╰─ benches                                  │               │               │               │         │
+   │     ├─ apply_delta                           │               │               │               │         │
+   │     │  ├─ 4096                 90.03 ns      │ 802.9 ns      │ 95.09 ns      │ 106.7 ns      │ 100     │ 1600
+   │     │  │                       45.45 GB/s    │ 5.097 GB/s    │ 43.03 GB/s    │ 38.32 GB/s    │         │
+   │     │  │                       max alloc:    │               │               │               │         │
+   │     │  │                         1           │ 1             │ 1             │ 1             │         │
+   │     │  │                         4.093 KB    │ 4.093 KB      │ 4.093 KB      │ 4.093 KB      │         │
+   │     │  │                       alloc:        │               │               │               │         │
+   │     │  │                         1           │ 1             │ 1             │ 1             │         │
+   │     │  │                         4.093 KB    │ 4.093 KB      │ 4.093 KB      │ 4.093 KB      │         │
+   │     │  ├─ 65536                1.022 µs      │ 19.26 µs      │ 1.045 µs      │ 1.261 µs      │ 100     │ 200
+   │     │  │                       64.07 GB/s    │ 3.401 GB/s    │ 62.69 GB/s    │ 51.97 GB/s    │         │
+   │     │  │                       max alloc:    │               │               │               │         │
+   │     │  │                         1           │ 1             │ 1             │ 1             │         │
+   │     │  │                         65.53 KB    │ 65.53 KB      │ 65.53 KB      │ 65.53 KB      │         │
+   │     │  │                       alloc:        │               │               │               │         │
+   │     │  │                         1           │ 1             │ 1             │ 1             │         │
+   │     │  │                         65.53 KB    │ 65.53 KB      │ 65.53 KB      │ 65.53 KB      │         │
+   │     │  ╰─ 1048576              19.65 µs      │ 169 µs        │ 20.3 µs       │ 25.08 µs      │ 100     │ 100
+   │     │                          53.34 GB/s    │ 6.203 GB/s    │ 51.65 GB/s    │ 41.8 GB/s     │         │
+   │     │                          max alloc:    │               │               │               │         │
+   │     │                            1           │ 1             │ 1             │ 1             │         │
+   │     │                            1.048 MB    │ 1.048 MB      │ 1.048 MB      │ 1.048 MB      │         │
+   │     │                          alloc:        │               │               │               │         │
+   │     │                            1           │ 1             │ 1             │ 1             │         │
+   │     │                            1.048 MB    │ 1.048 MB      │ 1.048 MB      │ 1.048 MB      │         │
+   │     ├─ decompress_data                       │               │               │               │         │
+   │     │  ├─ 4096                 8.624 µs      │ 22.49 µs      │ 8.837 µs      │ 9.171 µs      │ 100     │ 100
+   │     │  │                       472.3 MB/s    │ 181.1 MB/s    │ 460.9 MB/s    │ 444.2 MB/s    │         │
+   │     │  │                       max alloc:    │               │               │               │         │
+   │     │  │                         3           │ 3             │ 3             │ 3             │         │
+   │     │  │                         84.25 KB    │ 84.25 KB      │ 84.25 KB      │ 84.25 KB      │         │
+   │     │  │                       alloc:        │               │               │               │         │
+   │     │  │                         3           │ 3             │ 3             │ 3             │         │
+   │     │  │                         76.09 KB    │ 76.09 KB      │ 76.09 KB      │ 76.09 KB      │         │
+   │     │  │                       dealloc:      │               │               │               │         │
+   │     │  │                         2           │ 2             │ 2             │ 2             │         │
+   │     │  │                         76.06 KB    │ 76.06 KB      │ 76.06 KB      │ 76.06 KB      │         │
+   │     │  │                       grow:         │               │               │               │         │
+   │     │  │                         8           │ 8             │ 8             │ 8             │         │
+   │     │  │                         8.16 KB     │ 8.16 KB       │ 8.16 KB       │ 8.16 KB       │         │
+   │     │  ├─ 65536                68.1 µs       │ 111.5 µs      │ 68.41 µs      │ 70.72 µs      │ 100     │ 100
+   │     │  │                       962 MB/s      │ 587.4 MB/s    │ 957.6 MB/s    │ 926.4 MB/s    │         │
+   │     │  │                       max alloc:    │               │               │               │         │
+   │     │  │                         3           │ 3             │ 3             │ 3             │         │
+   │     │  │                         207.1 KB    │ 207.1 KB      │ 207.1 KB      │ 207.1 KB      │         │
+   │     │  │                       alloc:        │               │               │               │         │
+   │     │  │                         3           │ 3             │ 3             │ 3             │         │
+   │     │  │                         76.09 KB    │ 76.09 KB      │ 76.09 KB      │ 76.09 KB      │         │
+   │     │  │                       dealloc:      │               │               │               │         │
+   │     │  │                         2           │ 2             │ 2             │ 2             │         │
+   │     │  │                         76.06 KB    │ 76.06 KB      │ 76.06 KB      │ 76.06 KB      │         │
+   │     │  │                       grow:         │               │               │               │         │
+   │     │  │                         12          │ 12            │ 12            │ 12            │         │
+   │     │  │                         131 KB      │ 131 KB        │ 131 KB        │ 131 KB        │         │
+   │     │  ╰─ 1048576              1.063 ms      │ 1.319 ms      │ 1.097 ms      │ 1.107 ms      │ 100     │ 100
+   │     │                          986.2 MB/s    │ 794.7 MB/s    │ 955.1 MB/s    │ 946.7 MB/s    │         │
+   │     │                          max alloc:    │               │               │               │         │
+   │     │                            3           │ 3             │ 3             │ 3             │         │
+   │     │                            2.173 MB    │ 2.173 MB      │ 2.173 MB      │ 2.173 MB      │         │
+   │     │                          alloc:        │               │               │               │         │
+   │     │                            3           │ 3             │ 3             │ 3             │         │
+   │     │                            76.09 KB    │ 76.09 KB      │ 76.09 KB      │ 76.09 KB      │         │
+   │     │                          dealloc:      │               │               │               │         │
+   │     │                            2           │ 2             │ 2             │ 2             │         │
+   │     │                            76.06 KB    │ 76.06 KB      │ 76.06 KB      │ 76.06 KB      │         │
+   │     │                          grow:         │               │               │               │         │
+   │     │                            16          │ 16            │ 16            │ 16            │         │
+   │     │                            2.097 MB    │ 2.097 MB      │ 2.097 MB      │ 2.097 MB      │         │
+   │     ╰─ delta_result_size_1000  3.99 ms       │ 5.204 ms      │ 4.956 ms      │ 4.589 ms      │ 100     │ 100
+   │                                250.5 Kitem/s │ 192.1 Kitem/s │ 201.7 Kitem/s │ 217.8 Kitem/s │         │
+   │                                max alloc:    │               │               │               │         │
+   │                                  2           │ 2             │ 2             │ 2             │         │
+   │                                  76.06 KB    │ 76.06 KB      │ 76.06 KB      │ 76.06 KB      │         │
+   │                                alloc:        │               │               │               │         │
+   │                                  2000        │ 2000          │ 2000          │ 2000          │         │
+   │                                  76.06 MB    │ 76.06 MB      │ 76.06 MB      │ 76.06 MB      │         │
+   │                                dealloc:      │               │               │               │         │
+   │                                  2000        │ 2000          │ 2000          │ 2000          │         │
+   │                                  76.06 MB    │ 76.06 MB      │ 76.06 MB      │ 76.06 MB      │         │
+   ╰─ scan                                        │               │               │               │         │
+      ╰─ benches                                  │               │               │               │         │
+         ╰─ record_and_finish                     │               │               │               │         │
+            ╰─ 100000               30.01 ms      │ 36.78 ms      │ 32.37 ms      │ 32.35 ms      │ 100     │ 100
+                                    3.331 Mitem/s │ 2.718 Mitem/s │ 3.088 Mitem/s │ 3.09 Mitem/s  │         │
+                                    max alloc:    │               │               │               │         │
+                                      10          │ 10            │ 10            │ 10            │         │
+                                      27.28 MB    │ 27.28 MB      │ 27.28 MB      │ 27.28 MB      │         │
+                                    alloc:        │               │               │               │         │
+                                      13          │ 13            │ 13            │ 13            │         │
+                                      6.575 MB    │ 6.575 MB      │ 6.575 MB      │ 6.575 MB      │         │
+                                    dealloc:      │               │               │               │         │
+                                      7           │ 7             │ 7             │ 7             │         │
+                                      6.763 MB    │ 6.763 MB      │ 6.763 MB      │ 6.763 MB      │         │
+                                    grow:         │               │               │               │         │
+                                      80          │ 80            │ 80            │ 80            │         │
+                                      21.29 MB    │ 21.29 MB      │ 21.29 MB      │ 21.29 MB      │         │
+
