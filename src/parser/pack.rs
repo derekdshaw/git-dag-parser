@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use flate2::read::ZlibDecoder;
+use flate2::{Decompress, FlushDecompress};
 use hashbrown::HashMap;
 
 use crate::error::ParseError;
@@ -199,6 +200,7 @@ pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<Vec<ScannedEntry
     // Kind of each entry in `order`, filled as the scan proceeds
     let mut kinds: Vec<Option<ObjectKind>> = vec![None; order.len()];
     let mut entries = Vec::with_capacity(order.len());
+    let mut inflater = Decompress::new(true);
 
     for (pos, &i) in order.iter().enumerate() {
         let entry = &index.entries[i];
@@ -216,7 +218,11 @@ pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<Vec<ScannedEntry
                     // A REF delta may point forward to a base not yet scanned
                     _ => pack_kind(resolved_type(pack_data, index, base_offset)?)?,
                 };
-                (kind, delta_result_size(&pack_data[payload_start..])?, true)
+                (
+                    kind,
+                    delta_result_size(&mut inflater, &pack_data[payload_start..])?,
+                    true,
+                )
             }
             _ => (pack_kind(obj_type)?, obj_size, false),
         };
@@ -279,21 +285,16 @@ fn resolved_type(pack_data: &[u8], index: &PackIndex, mut offset: usize) -> Resu
 }
 
 /// Size of the object a delta produces: the second varint of the delta,
-/// after the base size. Only the first few bytes are inflated.
-fn delta_result_size(compressed: &[u8]) -> Result<u64> {
+/// after the base size. Only the first few bytes are inflated, with a
+/// decoder that is reset and reused for every delta.
+fn delta_result_size(inflater: &mut Decompress, compressed: &[u8]) -> Result<u64> {
     // Two varints of at most 10 bytes each
     let mut prefix = [0u8; 20];
-    let mut decoder = ZlibDecoder::new(compressed);
-    let mut len = 0;
-    while len < prefix.len() {
-        let n = decoder
-            .read(&mut prefix[len..])
-            .map_err(|e| ParseError::DecompressionError(e.to_string()))?;
-        if n == 0 {
-            break;
-        }
-        len += n;
-    }
+    inflater.reset(true);
+    inflater
+        .decompress(compressed, &mut prefix, FlushDecompress::None)
+        .map_err(|e| ParseError::DecompressionError(e.to_string()))?;
+    let len = inflater.total_out() as usize;
 
     let (_, base_len) = read_varint(&prefix[..len])?;
     let (size, _) = read_varint(&prefix[base_len..len])?;
@@ -649,7 +650,7 @@ mod benches {
     use divan::counter::{BytesCount, ItemsCount};
     use divan::{black_box, Bencher};
     use flate2::write::ZlibEncoder;
-    use flate2::Compression;
+    use flate2::{Compression, Decompress};
 
     use crate::parser::content::benches::synthetic_tree;
 
@@ -727,14 +728,21 @@ mod benches {
                 (zlib(&delta), result.len() as u64)
             })
             .collect();
+        // One decoder for the whole scan, as `scan_pack` uses it
+        let mut inflater = Decompress::new(true);
         for (compressed, size) in &deltas {
-            assert_eq!(super::delta_result_size(compressed).unwrap(), *size);
+            assert_eq!(
+                super::delta_result_size(&mut inflater, compressed).unwrap(),
+                *size
+            );
         }
         bencher
             .counter(ItemsCount::new(deltas.len()))
             .bench_local(|| {
                 for (compressed, _) in &deltas {
-                    black_box(super::delta_result_size(black_box(compressed)).unwrap());
+                    black_box(
+                        super::delta_result_size(&mut inflater, black_box(compressed)).unwrap(),
+                    );
                 }
             });
     }
@@ -1042,6 +1050,9 @@ mod tests {
     fn delta_result_size_reads_second_varint() {
         // Base size 5, result size 300, then a one-byte insert instruction
         let delta = [0x05, 0xac, 0x02, 0x01, b'x'];
-        assert_eq!(delta_result_size(&zlib(&delta)).unwrap(), 300);
+        assert_eq!(
+            delta_result_size(&mut Decompress::new(true), &zlib(&delta)).unwrap(),
+            300
+        );
     }
 }

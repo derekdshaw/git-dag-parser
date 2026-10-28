@@ -32,7 +32,7 @@ rayon = "1.10"
 memmap2 = "0.9"
 
 # Compression
-flate2 = "1.0"
+flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 
 # Fast hashing
 ahash = "0.8"
