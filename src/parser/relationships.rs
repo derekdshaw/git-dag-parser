@@ -4,7 +4,7 @@ use std::thread;
 use anyhow::Result;
 use crossbeam_channel::bounded;
 use hashbrown::HashMap;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressStyle;
 use tracing::info;
 
 use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw, WalkResult};
@@ -33,7 +33,7 @@ pub fn build_relationships(
     let num_workers = num_cpus::get();
     let total_commits = commits_raw.len();
 
-    println!(
+    info!(
         "Building relationships: {} commits, {} workers",
         total_commits, num_workers
     );
@@ -51,7 +51,7 @@ pub fn build_relationships(
     });
 
     // Progress bar
-    let progress = ProgressBar::new(total_commits as u64);
+    let progress = super::progress_bar(total_commits as u64);
     progress.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) ({eta}) {msg}")

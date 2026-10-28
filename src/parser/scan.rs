@@ -336,7 +336,7 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
 
     let packed_entries: usize = packs.iter().map(|p| p.index.entries.len()).sum();
     let expected = packed_entries + loose_files.len();
-    println!(
+    info!(
         "Found {} pack(s) with {} entries and {} loose objects ({:?})",
         packs.len(),
         packed_entries,
@@ -367,8 +367,8 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
                 mtime: pack.mtime,
             });
         }
-        println!(
-            "  Scanned {} ({:.2} MB, {} entries) in {:?}",
+        info!(
+            "Scanned {} ({:.2} MB, {} entries) in {:?}",
             pack.name,
             pack.size as f64 / (1024.0 * 1024.0),
             open.index.entries.len(),
@@ -397,12 +397,6 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
 
     let c = &scan.container;
     info!(
-        "Pass 1: {} objects from {} copies in {:?}",
-        scan.index.len(),
-        c.copies.len(),
-        start.elapsed()
-    );
-    println!(
         "Pass 1 (headers): C:{} T:{} B:{} t:{} from {} copies in {:?}",
         c.commits.len(),
         c.trees.len(),

@@ -11,6 +11,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use hashbrown::HashMap;
+use indicatif::ProgressBar;
+use tracing::{info, Level};
 
 use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
 use crate::models::{ObjectContainer, Ref};
@@ -57,7 +59,7 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
     // Resolve tree entry indices now that all objects are indexed
     let resolve_start = Instant::now();
     resolve_tree_entries(&mut trees_raw, &hash_index);
-    println!(
+    info!(
         "Resolved tree entry indices in {:?}",
         resolve_start.elapsed()
     );
@@ -73,9 +75,20 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
     // Build static tree↔blob relationships
     let static_start = Instant::now();
     build_static_relationships(&trees_raw, &mut container);
-    println!("Built static relationships in {:?}", static_start.elapsed());
+    info!("Built static relationships in {:?}", static_start.elapsed());
 
     Ok((commits_raw, trees_raw, hash_index, container))
+}
+
+/// A progress bar of `len` steps that draws only when info logging is on.
+/// Progress is reported through the program's logger like the other
+/// messages, so a caller with no logger, such as the benchmarks, sees none.
+fn progress_bar(len: u64) -> ProgressBar {
+    if tracing::enabled!(Level::INFO) {
+        ProgressBar::new(len)
+    } else {
+        ProgressBar::hidden()
+    }
 }
 
 /// Resolve tree entry child indices after all objects have been indexed

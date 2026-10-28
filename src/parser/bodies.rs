@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use hashbrown::HashMap;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressStyle;
 use tracing::info;
 
 use super::content::{parse_commit, parse_tag, parse_tree};
@@ -44,7 +44,7 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
 
     let to_read =
         scan.container.commits.len() + scan.container.trees.len() + scan.container.tags.len();
-    let progress = ProgressBar::new(to_read as u64);
+    let progress = super::progress_bar(to_read as u64);
     progress.set_style(
         ProgressStyle::default_bar()
             .template("  Reading bodies [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) [{elapsed_precise}] {msg}")
@@ -126,7 +126,7 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
     }
 
     progress.finish_and_clear();
-    println!(
+    info!(
         "Pass 2 (bodies): {} commits, {} trees, {} tags in {:?}",
         bodies.commits_raw.len(),
         bodies.trees_raw.len(),
