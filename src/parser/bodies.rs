@@ -57,13 +57,13 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
 
     for pos in 0..scan.container.copies.len() {
         let copy = scan.container.copies[pos];
-        let id = copy.object;
+        let id = copy.object();
         if id.kind() == ObjectKind::Blob || scan.primary(id) != pos {
             continue;
         }
 
         let hash = scan.container.hash_of(id);
-        let body = match copy.pack {
+        let body = match copy.pack() {
             Some(pack_idx) => {
                 if reader.as_ref().is_none_or(|(p, _)| *p != pack_idx) {
                     if let Some((p, r)) = &reader {
@@ -73,7 +73,7 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
                     reader = Some((pack_idx, PackReader::new(&open.data, &open.index)));
                 }
                 let (_, r) = reader.as_mut().unwrap();
-                let offset = copy.offset.unwrap_or(0);
+                let offset = copy.offset().unwrap_or(0);
                 r.read(offset).with_context(|| {
                     format!(
                         "Failed to inflate {} at offset {} of {}",

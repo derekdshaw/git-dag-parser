@@ -107,9 +107,10 @@ pub struct ScannedCopy {
 /// The rule for choosing an object's primary copy: a packed copy over a
 /// loose one; a pack that is neither cruft nor promisor over one that is;
 /// a newer pack over an older one; and finally the pack that sorts first by
-/// name, so the choice is stable.
+/// name, so the choice is stable. An object has at most one loose copy, so a
+/// loose copy is only ever ranked against packed ones.
 fn rank<'a>(copy: &ObjectCopy, packs: &'a [Pack]) -> (bool, bool, i64, Reverse<&'a str>) {
-    match copy.pack {
+    match copy.pack() {
         Some(p) => {
             let pack = &packs[p];
             (
@@ -119,7 +120,7 @@ fn rank<'a>(copy: &ObjectCopy, packs: &'a [Pack]) -> (bool, bool, i64, Reverse<&
                 Reverse(pack.name.as_str()),
             )
         }
-        None => (false, true, copy.mtime, Reverse("")),
+        None => (false, true, 0, Reverse("")),
     }
 }
 
@@ -159,15 +160,13 @@ impl Scan {
         };
 
         let copy = match found.pack {
-            Some(pack) => ObjectCopy::packed(
-                id,
-                pack,
-                found.offset,
-                found.size_disk,
-                found.is_delta,
-                found.mtime,
-            ),
-            None => ObjectCopy::loose(id, found.size_disk, found.mtime),
+            Some(pack) => {
+                ObjectCopy::packed(id, pack, found.offset, found.size_disk, found.is_delta)
+            }
+            None => {
+                self.container.loose_mtimes.push((id, found.mtime));
+                ObjectCopy::loose(id, found.size_disk)
+            }
         };
         let pos = self.container.copies.len();
         self.container.copies.push(copy);
@@ -206,10 +205,15 @@ impl Scan {
             self.primary[kind] = primary;
         }
 
+        let renumber =
+            |id: ObjectId| ObjectId::new(id.kind(), new_index[id.kind() as usize][id.index()]);
         for copy in &mut c.copies {
-            let id = copy.object;
-            copy.object = ObjectId::new(id.kind(), new_index[id.kind() as usize][id.index()]);
+            copy.set_object(renumber(copy.object()));
         }
+        for (id, _) in &mut c.loose_mtimes {
+            *id = renumber(*id);
+        }
+        c.loose_mtimes.sort_unstable();
         for positions in &self.primary {
             for &pos in positions {
                 c.copies[pos as usize].is_primary = true;
@@ -518,11 +522,11 @@ mod tests {
     }
 
     fn packed(pack: usize) -> ObjectCopy {
-        ObjectCopy::packed(ObjectId::Blob(0), pack, 12, 8, false, 0)
+        ObjectCopy::packed(ObjectId::Blob(0), pack, 12, 8, false)
     }
 
-    fn loose(mtime: i64) -> ObjectCopy {
-        ObjectCopy::loose(ObjectId::Blob(0), 8, mtime)
+    fn loose() -> ObjectCopy {
+        ObjectCopy::loose(ObjectId::Blob(0), 8)
     }
 
     fn found(
@@ -569,8 +573,8 @@ mod tests {
         assert_eq!(c.blobs[1].index, 1);
         assert_eq!((c.blobs[1].size, c.blobs[1].size_disk), (100, 5));
         assert_eq!(c.copies.len(), 5);
-        assert_eq!(c.copies[3].object, ObjectId::Tree(0));
-        assert_eq!(c.copies[3].offset, Some(27));
+        assert_eq!(c.copies[3].object(), ObjectId::Tree(0));
+        assert_eq!(c.copies[3].offset(), Some(27));
         assert!(c.copies[3].is_delta);
     }
 
@@ -589,7 +593,7 @@ mod tests {
             .container
             .copies
             .iter()
-            .all(|c| c.object == ObjectId::Tree(0)));
+            .all(|c| c.object() == ObjectId::Tree(0)));
         assert_eq!(
             scan.primary(ObjectId::Tree(0)),
             1,
@@ -640,7 +644,7 @@ mod tests {
         assert_eq!(scan.index.get(&[2; 20]), Some(ObjectId::Tree(0)));
 
         // Copies keep their recorded order but point at the new indices
-        let objects: Vec<ObjectId> = c.copies.iter().map(|c| c.object).collect();
+        let objects: Vec<ObjectId> = c.copies.iter().map(|c| c.object()).collect();
         assert_eq!(
             objects,
             vec![
@@ -673,8 +677,8 @@ mod tests {
     #[test]
     fn packed_copy_beats_loose_copy() {
         let packs = vec![pack(0, "pack-a.pack", 100)];
-        assert!(better_copy(&packed(0), &loose(999), &packs));
-        assert!(!better_copy(&loose(999), &packed(0), &packs));
+        assert!(better_copy(&packed(0), &loose(), &packs));
+        assert!(!better_copy(&loose(), &packed(0), &packs));
     }
 
     #[test]
@@ -710,6 +714,6 @@ mod tests {
     fn a_copy_is_not_better_than_an_equal_copy() {
         let packs = vec![pack(0, "pack-a.pack", 100)];
         assert!(!better_copy(&packed(0), &packed(0), &packs));
-        assert!(!better_copy(&loose(5), &loose(5), &packs));
+        assert!(!better_copy(&loose(), &loose(), &packs));
     }
 }

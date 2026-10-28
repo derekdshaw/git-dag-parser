@@ -5,7 +5,7 @@ use super::container::ObjectHash;
 
 /// A typed reference to an object: the variant names the container array,
 /// the value is the index into it
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ObjectId {
     Commit(usize),
     Tree(usize),
@@ -331,26 +331,32 @@ impl Pack {
 
 /// One on-disk copy of an object. The same object can be stored in several
 /// packs and as a loose file at once; each location is its own copy.
+///
+/// Kept to 32 bytes, since a large repository has millions of copies. The
+/// modification time is not stored here: a packed copy has its pack's mtime,
+/// and a loose copy's mtime is in `ObjectContainer::loose_mtimes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectCopy {
-    /// The object this is a copy of
-    pub object: ObjectId,
-    /// Index into the packs array, or None for a loose copy
-    pub pack: Option<usize>,
-    /// Byte offset of the entry within the pack; None for a loose copy
-    pub offset: Option<u64>,
+    /// Byte offset of the entry in the pack; 0 for a loose copy. No pack
+    /// entry starts at 0, since the 12-byte pack header is there.
+    offset: u64,
     /// Compressed size on disk: the pack entry's span, or the loose file's size
     pub size_disk: u64,
+    /// Index of the object within its kind
+    index: u32,
+    /// Index into the packs array, or `LOOSE` for a loose copy
+    pack: u32,
+    kind: ObjectKind,
     /// True if the pack entry is stored as a delta against another entry.
     /// Loose copies are always stored whole.
     pub is_delta: bool,
-    /// Modification time of the file holding the copy (the pack file or the
-    /// loose file), seconds since the Unix epoch
-    pub mtime: i64,
     /// True for the one copy per object that gives it its `size_disk` and
     /// that its body is read from
     pub is_primary: bool,
 }
+
+/// `ObjectCopy::pack` value for a loose copy
+const LOOSE: u32 = u32::MAX;
 
 impl ObjectCopy {
     /// A copy stored as an entry in a pack
@@ -360,36 +366,60 @@ impl ObjectCopy {
         offset: u64,
         size_disk: u64,
         is_delta: bool,
-        mtime: i64,
     ) -> Self {
         Self {
-            object,
-            pack: Some(pack),
-            offset: Some(offset),
+            offset,
             size_disk,
+            index: index_u32(object.index()),
+            pack: u32::try_from(pack).expect("pack index fits in u32"),
+            kind: object.kind(),
             is_delta,
-            mtime,
             is_primary: false,
         }
     }
 
     /// A copy stored as a loose object file
-    pub fn loose(object: ObjectId, size_disk: u64, mtime: i64) -> Self {
+    pub fn loose(object: ObjectId, size_disk: u64) -> Self {
         Self {
-            object,
-            pack: None,
-            offset: None,
+            offset: 0,
             size_disk,
+            index: index_u32(object.index()),
+            pack: LOOSE,
+            kind: object.kind(),
             is_delta: false,
-            mtime,
             is_primary: false,
         }
     }
 
+    /// The object this is a copy of
+    pub fn object(&self) -> ObjectId {
+        ObjectId::new(self.kind, self.index as usize)
+    }
+
+    /// Point the copy at an object's new index
+    pub fn set_object(&mut self, object: ObjectId) {
+        self.kind = object.kind();
+        self.index = index_u32(object.index());
+    }
+
+    /// Index into the packs array, or None for a loose copy
+    pub fn pack(&self) -> Option<usize> {
+        (self.pack != LOOSE).then_some(self.pack as usize)
+    }
+
+    /// Byte offset of the entry in the pack, or None for a loose copy
+    pub fn offset(&self) -> Option<u64> {
+        (self.pack != LOOSE).then_some(self.offset)
+    }
+
     /// True for a loose copy, false for one in a pack
     pub fn is_loose(&self) -> bool {
-        self.pack.is_none()
+        self.pack == LOOSE
     }
+}
+
+fn index_u32(index: usize) -> u32 {
+    u32::try_from(index).expect("object index fits in u32")
 }
 
 #[cfg(test)]
@@ -494,36 +524,48 @@ mod tests {
     }
 
     #[test]
-    fn object_copy_packed_records_location_in_pack() {
-        let c = ObjectCopy::packed(ObjectId::Blob(5), 2, 1234, 77, true, 1_700_000_000);
+    fn object_copy_is_32_bytes() {
+        // Large repositories have one copy for each of millions of objects.
+        assert_eq!(std::mem::size_of::<ObjectCopy>(), 32);
+    }
 
-        assert_eq!(c.object, ObjectId::Blob(5));
-        assert_eq!(c.pack, Some(2));
-        assert_eq!(c.offset, Some(1234));
+    #[test]
+    fn object_copy_packed_records_location_in_pack() {
+        let c = ObjectCopy::packed(ObjectId::Blob(5), 2, 1234, 77, true);
+
+        assert_eq!(c.object(), ObjectId::Blob(5));
+        assert_eq!(c.pack(), Some(2));
+        assert_eq!(c.offset(), Some(1234));
         assert_eq!(c.size_disk, 77);
         assert!(c.is_delta);
-        assert_eq!(c.mtime, 1_700_000_000);
         assert!(!c.is_loose());
     }
 
     #[test]
     fn object_copy_loose_has_no_pack_offset_or_delta() {
-        let c = ObjectCopy::loose(ObjectId::Commit(1), 250, 1_700_000_123);
+        let c = ObjectCopy::loose(ObjectId::Commit(1), 250);
 
-        assert_eq!(c.object, ObjectId::Commit(1));
-        assert_eq!(c.pack, None);
-        assert_eq!(c.offset, None);
+        assert_eq!(c.object(), ObjectId::Commit(1));
+        assert_eq!(c.pack(), None);
+        assert_eq!(c.offset(), None);
         assert_eq!(c.size_disk, 250);
         assert!(!c.is_delta);
-        assert_eq!(c.mtime, 1_700_000_123);
         assert!(c.is_loose());
+    }
+
+    #[test]
+    fn object_copy_set_object_moves_it_to_a_new_index() {
+        let mut c = ObjectCopy::packed(ObjectId::Tree(3), 1, 40, 8, false);
+        c.set_object(ObjectId::Tree(0));
+        assert_eq!(c.object(), ObjectId::Tree(0));
+        assert_eq!(c.pack(), Some(1));
     }
 
     #[test]
     fn object_copy_round_trips_through_serde() {
         for copy in [
-            ObjectCopy::packed(ObjectId::Tree(9), 0, u64::MAX, 10, false, 1),
-            ObjectCopy::loose(ObjectId::Tag(0), 20, 2),
+            ObjectCopy::packed(ObjectId::Tree(9), 0, u64::MAX, 10, false),
+            ObjectCopy::loose(ObjectId::Tag(0), 20),
         ] {
             let json = serde_json::to_string(&copy).unwrap();
             let back: ObjectCopy = serde_json::from_str(&json).unwrap();

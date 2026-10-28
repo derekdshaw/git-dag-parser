@@ -143,7 +143,7 @@ fn every_on_disk_copy_is_recorded() {
         let in_pack: Vec<_> = container
             .copies
             .iter()
-            .filter(|c| c.pack == Some(pack.index))
+            .filter(|c| c.pack() == Some(pack.index))
             .collect();
         assert_eq!(
             in_pack.len(),
@@ -151,9 +151,11 @@ fn every_on_disk_copy_is_recorded() {
             "copies in {}",
             pack.name
         );
-        assert!(in_pack.iter().all(|c| c.offset.is_some()));
-        assert!(in_pack.iter().all(|c| c.mtime == pack.mtime));
-        let mut offsets: Vec<u64> = in_pack.iter().map(|c| c.offset.unwrap()).collect();
+        assert!(in_pack.iter().all(|c| c.offset().is_some()));
+        assert!(in_pack
+            .iter()
+            .all(|c| container.copy_mtime(c) == pack.mtime));
+        let mut offsets: Vec<u64> = in_pack.iter().map(|c| c.offset().unwrap()).collect();
         assert!(
             offsets.windows(2).all(|w| w[0] < w[1]),
             "copies are in offset order"
@@ -164,7 +166,23 @@ fn every_on_disk_copy_is_recorded() {
 
     let loose: Vec<_> = container.copies.iter().filter(|c| c.is_loose()).collect();
     assert_eq!(loose.len(), loose_count);
-    assert!(loose.iter().all(|c| c.offset.is_none() && !c.is_delta));
+    assert!(loose.iter().all(|c| c.offset().is_none() && !c.is_delta));
+    for copy in &loose {
+        let hash = hex(&container.hash_of(copy.object()));
+        let path = repo
+            .git_dir()
+            .join("objects")
+            .join(&hash[..2])
+            .join(&hash[2..]);
+        let mtime = fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(container.copy_mtime(copy), mtime, "loose {hash}");
+    }
 
     let deltas = container.copies.iter().filter(|c| c.is_delta).count();
     assert_eq!(deltas, repo.deltified_count());
@@ -173,7 +191,7 @@ fn every_on_disk_copy_is_recorded() {
         + container.trees.len()
         + container.blobs.len()
         + container.tags.len();
-    let with_copies: HashSet<_> = container.copies.iter().map(|c| c.object).collect();
+    let with_copies: HashSet<_> = container.copies.iter().map(|c| c.object()).collect();
     assert_eq!(
         with_copies.len(),
         total_objects,
@@ -208,7 +226,7 @@ fn primary_copy_is_in_the_newest_pack() {
     assert_eq!(newest.index, container.packs.len() - 1);
     let mut primaries: HashMap<ObjectId, usize> = HashMap::new();
     for copy in container.copies.iter().filter(|c| c.is_primary) {
-        *primaries.entry(copy.object).or_default() += 1;
+        *primaries.entry(copy.object()).or_default() += 1;
     }
     assert!(
         primaries.values().all(|&n| n == 1),
@@ -223,16 +241,16 @@ fn primary_copy_is_in_the_newest_pack() {
     let newest_copies: Vec<_> = container
         .copies
         .iter()
-        .filter(|c| c.pack == Some(newest.index))
+        .filter(|c| c.pack() == Some(newest.index))
         .collect();
     assert!(!newest_copies.is_empty());
     for copy in newest_copies {
         assert!(
             copy.is_primary,
             "{:?} should use its copy in the newest pack",
-            copy.object
+            copy.object()
         );
-        let size_disk = match copy.object {
+        let size_disk = match copy.object() {
             ObjectId::Commit(i) => container.commits[i].size_disk,
             ObjectId::Tree(i) => container.trees[i].size_disk,
             ObjectId::Blob(i) => container.blobs[i].size_disk,
@@ -322,10 +340,10 @@ fn copy_disk_sizes_match_verify_pack() {
     let packed: Vec<_> = container.copies.iter().filter(|c| !c.is_loose()).collect();
     assert_eq!(packed.len(), expected.len());
     for copy in packed {
-        let pack = &container.packs[copy.pack.unwrap()];
-        let key = (pack.name.clone(), copy.offset.unwrap());
+        let pack = &container.packs[copy.pack().unwrap()];
+        let key = (pack.name.clone(), copy.offset().unwrap());
         let (hash, size_in_pack) = &expected[&key];
-        assert_eq!(hex(&container.hash_of(copy.object)), *hash, "{key:?}");
+        assert_eq!(hex(&container.hash_of(copy.object())), *hash, "{key:?}");
         assert_eq!(copy.size_disk, *size_in_pack, "{key:?}");
     }
 }
@@ -348,9 +366,9 @@ fn cruft_pack_holds_the_unreachable_blob() {
     let copies: Vec<_> = container
         .copies
         .iter()
-        .filter(|c| c.object == ObjectId::Blob(blob.index))
+        .filter(|c| c.object() == ObjectId::Blob(blob.index))
         .collect();
     assert_eq!(copies.len(), 1);
-    assert_eq!(copies[0].pack, Some(cruft[0].index));
+    assert_eq!(copies[0].pack(), Some(cruft[0].index));
     assert!(copies[0].is_primary);
 }

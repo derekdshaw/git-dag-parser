@@ -23,6 +23,10 @@ pub struct ObjectContainer {
     pub packs: Vec<Pack>,
     /// Every on-disk copy of every object, across packs and loose files
     pub copies: Vec<ObjectCopy>,
+    /// Modification time of each loose copy, by object, sorted by object.
+    /// An object has at most one loose copy. A list rather than a map so it
+    /// serializes to JSON, which allows only string keys.
+    pub loose_mtimes: Vec<(ObjectId, i64)>,
 }
 
 impl ObjectContainer {
@@ -41,6 +45,22 @@ impl ObjectContainer {
             refs: Vec::new(),
             packs: Vec::new(),
             copies: Vec::new(),
+            loose_mtimes: Vec::new(),
+        }
+    }
+
+    /// Modification time of the file holding a copy: its pack file, or its
+    /// loose object file. Seconds since the Unix epoch.
+    pub fn copy_mtime(&self, copy: &ObjectCopy) -> i64 {
+        match copy.pack() {
+            Some(pack) => self.packs[pack].mtime,
+            None => {
+                let i = self
+                    .loose_mtimes
+                    .binary_search_by_key(&copy.object(), |&(id, _)| id)
+                    .expect("every loose copy has an mtime");
+                self.loose_mtimes[i].1
+            }
         }
     }
 
@@ -323,23 +343,42 @@ mod tests {
         container
             .packs
             .push(Pack::new(0, "pack-a.pack".to_string(), 100, 1_700_000_000));
-        container.copies.push(ObjectCopy::packed(
-            ObjectId::Blob(0),
-            0,
-            12,
-            5,
-            false,
-            1_700_000_000,
-        ));
         container
             .copies
-            .push(ObjectCopy::loose(ObjectId::Blob(0), 9, 1_700_000_001));
+            .push(ObjectCopy::packed(ObjectId::Blob(0), 0, 12, 5, false));
+        container
+            .copies
+            .push(ObjectCopy::loose(ObjectId::Blob(0), 9));
+        container
+            .loose_mtimes
+            .push((ObjectId::Blob(0), 1_700_000_001));
 
         let json = serde_json::to_string(&container).unwrap();
         let back: ObjectContainer = serde_json::from_str(&json).unwrap();
 
         assert_eq!(back.packs, container.packs);
         assert_eq!(back.copies, container.copies);
+        assert_eq!(back.loose_mtimes, container.loose_mtimes);
+    }
+
+    #[test]
+    fn copy_mtime_reads_the_pack_or_the_loose_file() {
+        let mut container = ObjectContainer::new();
+        container
+            .packs
+            .push(Pack::new(0, "pack-a.pack".to_string(), 100, 1_700_000_000));
+        let packed = ObjectCopy::packed(ObjectId::Blob(0), 0, 12, 5, false);
+        let loose_a = ObjectCopy::loose(ObjectId::Blob(1), 9);
+        let loose_b = ObjectCopy::loose(ObjectId::Tree(0), 9);
+        container.loose_mtimes = vec![
+            (ObjectId::Tree(0), 1_700_000_300),
+            (ObjectId::Blob(1), 1_700_000_200),
+        ];
+        container.loose_mtimes.sort();
+
+        assert_eq!(container.copy_mtime(&packed), 1_700_000_000);
+        assert_eq!(container.copy_mtime(&loose_a), 1_700_000_200);
+        assert_eq!(container.copy_mtime(&loose_b), 1_700_000_300);
     }
 
     #[test]
