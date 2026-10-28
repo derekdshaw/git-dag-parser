@@ -17,6 +17,14 @@ use crate::models::{ObjectContainer, Ref};
 
 pub use relationships::build_relationships;
 
+/// Raw commit and tree data, the hash index, and the container
+pub type ParsedObjects = (
+    HashMap<ObjectHash, CommitRaw>,
+    HashMap<ObjectHash, TreeRaw>,
+    HashIndex,
+    ObjectContainer,
+);
+
 /// Parse all Git objects from a repository's object store
 ///
 /// Two passes over the object store:
@@ -33,14 +41,7 @@ pub use relationships::build_relationships;
 ///
 /// Static relationships (tree→blob, tree→subtree, blob→tree) are also
 /// built here since they're inherent to the tree structure.
-pub fn parse_objects(
-    git_dir: &Path,
-) -> Result<(
-    HashMap<ObjectHash, CommitRaw>,
-    HashMap<ObjectHash, TreeRaw>,
-    HashIndex,
-    ObjectContainer,
-)> {
+pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
     let mut scanned = scan::scan_repository(git_dir)?;
     let bodies::Bodies {
         commits_raw,

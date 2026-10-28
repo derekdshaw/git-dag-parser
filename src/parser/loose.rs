@@ -150,7 +150,7 @@ mod tests {
     fn read_loose_header_does_not_inflate_the_body() {
         let dir = tempfile::tempdir().unwrap();
         let mut body = b"blob 1048576\0".to_vec();
-        body.extend(std::iter::repeat(b'x').take(1024 * 1024));
+        body.extend(std::iter::repeat_n(b'x', 1024 * 1024));
         // Cut the stream short: inflating the whole object would fail, so this
         // only passes if just the header is read.
         let path = write_object(dir.path(), "truncated", &body, Some(64));
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn read_loose_object_returns_kind_and_body() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_object(dir.path(), "whole", b"tree 9\0100644 xy", None);
+        let path = write_object(dir.path(), "whole", b"tree 9\x00100644 xy", None);
 
         let (kind, body) = read_loose_object(&path).unwrap();
 
@@ -209,7 +209,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for (kind, body) in [
             (ObjectKind::Commit, &b"commit 5\0tree "[..]),
-            (ObjectKind::Tree, &b"tree 7\0100644 "[..]),
+            (ObjectKind::Tree, &b"tree 7\x00100644 "[..]),
             (ObjectKind::Blob, &b"blob 3\0abc"[..]),
             (ObjectKind::Tag, &b"tag 9\0object ab"[..]),
         ] {

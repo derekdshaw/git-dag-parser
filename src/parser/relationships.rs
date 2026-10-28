@@ -110,9 +110,9 @@ pub fn build_relationships(
         processed += 1;
         progress.set_position(processed);
 
-        if processed % 5000 == 0 {
-            let avg_trees = if processed > 0 { total_trees / processed } else { 0 };
-            let avg_blobs = if processed > 0 { total_blobs / processed } else { 0 };
+        if processed.is_multiple_of(5000) {
+            let avg_trees = total_trees / processed;
+            let avg_blobs = total_blobs / processed;
             progress.set_message(format!(
                 "avg: {}t/{}b per commit",
                 avg_trees, avg_blobs,
