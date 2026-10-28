@@ -188,9 +188,18 @@ def compare(args: argparse.Namespace) -> None:
                   f"{'–' if not n else fmt_ns(n['time_ns']['median'])} | only in {'new' if n else 'old'} | | | | |")
             continue
         om, nm = o["time_ns"]["median"], n["time_ns"]["median"]
-        alloc = lambda b, k: (b["alloc"].get("alloc", {}).get(k, {}) or {}).get("median")
-        cell = lambda v, bytes_=False: "–" if v is None else (f"{v / 1e6:.3g} MB" if bytes_ and v >= 1e6 else
-                                                             f"{v / 1e3:.3g} KB" if bytes_ and v >= 1e3 else f"{v:,.0f}")
+
+        def alloc(bench: dict, kind: str) -> float:
+            # divan leaves out the allocation rows when a benchmark allocates nothing
+            return (bench["alloc"].get("alloc", {}).get(kind) or {}).get("median") or 0.0
+
+        def cell(v: float, bytes_: bool = False) -> str:
+            if bytes_:
+                for unit, scale in (("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
+                    if v >= scale:
+                        return f"{v / scale:.3g} {unit}"
+                return f"{v:,.0f} B"
+            return f"{v:,.0f}"
         print(f"| {name} | {fmt_ns(om)} | {fmt_ns(nm)} | {100 * (nm - om) / om:+.1f}% | "
               f"{cell(alloc(o, 'count'))} | {cell(alloc(n, 'count'))} | "
               f"{cell(alloc(o, 'bytes'), True)} | {cell(alloc(n, 'bytes'), True)} |")
