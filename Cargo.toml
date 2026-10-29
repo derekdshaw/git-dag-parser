@@ -13,10 +13,6 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 thiserror = "1"
 
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -36,7 +32,7 @@ flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 
 # Fast hashing
 ahash = "0.8"
-hashbrown = { version = "0.14", features = ["serde"] }
+hashbrown = "0.14"
 
 # Path name interning
 intaglio = { version = "1.15", default-features = false, features = ["bytes"] }

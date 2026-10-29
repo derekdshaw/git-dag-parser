@@ -9,7 +9,7 @@ use crate::models::ObjectContainer;
 use crate::parser;
 
 /// Run the init command: parse a Git repository and build the DAG
-pub fn run(repo_path: &Path, output: &Option<PathBuf>) -> Result<()> {
+pub fn run(repo_path: &Path) -> Result<()> {
     let start = Instant::now();
 
     info!("Initializing DAG from repository: {}", repo_path.display());
@@ -34,13 +34,6 @@ pub fn run(repo_path: &Path, output: &Option<PathBuf>) -> Result<()> {
     parser::build_relationships(commits_raw, trees_raw, names, &hash_index, &mut container)
         .context("Failed to build relationships")?;
     let phase2_elapsed = phase2_start.elapsed();
-
-    // Save the DAG if output path specified
-    if let Some(output_path) = output {
-        info!("Saving DAG to: {}", output_path.display());
-        save_dag(&container, output_path).context("Failed to save DAG")?;
-        println!("DAG saved to: {}", output_path.display());
-    }
 
     let total_elapsed = start.elapsed();
     print_summary(
@@ -86,16 +79,6 @@ fn find_git_dir(repo_path: &Path) -> Result<PathBuf> {
     }
 
     Err(DagError::NotAGitRepo(repo_path.display().to_string()).into())
-}
-
-/// Save the DAG to a binary file
-fn save_dag(container: &ObjectContainer, path: &Path) -> Result<()> {
-    // TODO: Implement binary serialization
-    let json = serde_json::to_string_pretty(container)
-        .map_err(|e| DagError::Serialization(e.to_string()))?;
-
-    std::fs::write(path, json)?;
-    Ok(())
 }
 
 /// Print a summary of the parsed DAG

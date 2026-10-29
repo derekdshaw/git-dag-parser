@@ -1,11 +1,10 @@
 use hashbrown::HashSet;
-use serde::{Deserialize, Serialize};
 
 use super::container::ObjectHash;
 
 /// A typed reference to an object: the variant names the container array,
 /// the value is the index into it
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ObjectId {
     Commit(usize),
     Tree(usize),
@@ -42,7 +41,7 @@ impl ObjectId {
 
 /// The four kinds of object git stores. Pack entries name them by a 3-bit
 /// code, loose objects by a word in their header; this is the common form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObjectKind {
     Commit,
     Tree,
@@ -86,7 +85,7 @@ impl ObjectKind {
 }
 
 /// A Git commit object with its relationships
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Commit {
     /// Index in the commits array (for fast lookups)
     pub index: usize,
@@ -129,7 +128,7 @@ impl Commit {
 }
 
 /// A Git tree object with its relationships
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Tree {
     /// Index in the trees array
     pub index: usize,
@@ -165,7 +164,7 @@ impl Tree {
 }
 
 /// A Git blob object with its relationships
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Blob {
     /// Index in the blobs array
     pub index: usize,
@@ -198,7 +197,7 @@ impl Blob {
 }
 
 /// A Git annotated tag object
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Tag {
     /// Index in the tags array
     pub index: usize,
@@ -233,7 +232,7 @@ impl Tag {
 }
 
 /// What a ref is, from its name
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefKind {
     /// `refs/heads/*`
     Branch,
@@ -269,7 +268,7 @@ impl RefKind {
 
 /// A ref: a name pointing directly at an object. Symbolic refs are not kept,
 /// since the ref they name is recorded on its own.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Ref {
     /// Full ref name, such as `refs/heads/main`, as raw bytes
     pub name: Vec<u8>,
@@ -293,7 +292,7 @@ impl Ref {
 
 /// A pack file in `objects/pack/`, so that an object's on-disk copies can be
 /// recorded and retrieved later
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pack {
     /// Index in the packs array
     pub index: usize,
@@ -335,7 +334,7 @@ impl Pack {
 /// Kept to 32 bytes, since a large repository has millions of copies. The
 /// modification time is not stored here: a packed copy has its pack's mtime,
 /// and a loose copy's mtime is in `ObjectContainer::loose_mtimes`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectCopy {
     /// Byte offset of the entry in the pack; 0 for a loose copy. No pack
     /// entry starts at 0, since the 12-byte pack header is there.
@@ -559,29 +558,5 @@ mod tests {
         c.set_object(ObjectId::Tree(0));
         assert_eq!(c.object(), ObjectId::Tree(0));
         assert_eq!(c.pack(), Some(1));
-    }
-
-    #[test]
-    fn object_copy_round_trips_through_serde() {
-        for copy in [
-            ObjectCopy::packed(ObjectId::Tree(9), 0, u64::MAX, 10, false),
-            ObjectCopy::loose(ObjectId::Tag(0), 20),
-        ] {
-            let json = serde_json::to_string(&copy).unwrap();
-            let back: ObjectCopy = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, copy);
-        }
-    }
-
-    #[test]
-    fn pack_round_trips_through_serde() {
-        let mut p = Pack::new(7, "pack-ffff.pack".to_string(), 123_456, 1_700_000_999);
-        p.keep = true;
-        p.promisor = true;
-
-        let json = serde_json::to_string(&p).unwrap();
-        let back: Pack = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(back, p);
     }
 }
