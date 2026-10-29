@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        cli::Commands::Init { repo, output } => commands::init::run(&repo, &output),
+        cli::Commands::Init { repo } => commands::init::run(&repo),
         cli::Commands::Analyze { dag_file } => commands::analyze::run(&dag_file),
         cli::Commands::Query { dag_file, query } => commands::query::run(&dag_file, &query),
     }

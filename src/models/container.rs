@@ -1,5 +1,4 @@
 use hashbrown::HashMap;
-use serde::{Deserialize, Serialize};
 
 use super::name_store::NameId;
 use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, Tag, Tree};
@@ -8,7 +7,7 @@ use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, Tag, Tree};
 pub type ObjectHash = [u8; 20];
 
 /// Container for all parsed Git objects and their relationships
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default)]
 pub struct ObjectContainer {
     /// All commit objects
     pub commits: Vec<Commit>,
@@ -25,8 +24,7 @@ pub struct ObjectContainer {
     /// Every on-disk copy of every object, across packs and loose files
     pub copies: Vec<ObjectCopy>,
     /// Modification time of each loose copy, by object, sorted by object.
-    /// An object has at most one loose copy. A list rather than a map so it
-    /// serializes to JSON, which allows only string keys.
+    /// An object has at most one loose copy.
     pub loose_mtimes: Vec<(ObjectId, i64)>,
 }
 
@@ -185,7 +183,7 @@ pub mod mode {
 }
 
 /// The kind of object a tree entry references
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum FileKind {
     /// Directory (tree object)
@@ -336,31 +334,6 @@ mod tests {
         let container = ObjectContainer::with_capacity(1, 2, 3, 4);
         assert!(container.packs.is_empty());
         assert!(container.copies.is_empty());
-    }
-
-    #[test]
-    fn container_serializes_packs_and_copies() {
-        let mut container = ObjectContainer::new();
-        container.blobs.push(Blob::new(0, [1; 20], 10, 5));
-        container
-            .packs
-            .push(Pack::new(0, "pack-a.pack".to_string(), 100, 1_700_000_000));
-        container
-            .copies
-            .push(ObjectCopy::packed(ObjectId::Blob(0), 0, 12, 5, false));
-        container
-            .copies
-            .push(ObjectCopy::loose(ObjectId::Blob(0), 9));
-        container
-            .loose_mtimes
-            .push((ObjectId::Blob(0), 1_700_000_001));
-
-        let json = serde_json::to_string(&container).unwrap();
-        let back: ObjectContainer = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(back.packs, container.packs);
-        assert_eq!(back.copies, container.copies);
-        assert_eq!(back.loose_mtimes, container.loose_mtimes);
     }
 
     #[test]

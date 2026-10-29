@@ -292,14 +292,14 @@ These relationships depend on which commits reference which trees:
 Parse a Git repository and build the relationship DAG.
 
 ```bash
-git-dag-parser init --repo /path/to/repo --output dag.bin
+git-dag-parser init --repo /path/to/repo
 ```
 
 Phases:
 1. Parse pack files and loose objects
 2. Build static tree↔blob relationships
 3. Walk commit trees with parallel workers
-4. Merge results and save DAG
+4. Merge results
 
 ### `analyze`
 
@@ -346,11 +346,10 @@ git-dag-parser query --dag-file dag.bin --query "path:src/main.rs"
 
 ## Future Enhancements
 
-1. **Binary serialization** - Replace JSON with bincode for faster save/load
-2. **Incremental updates** - Only process new objects since last run
-3. **Memory-mapped output** - For very large repositories
-4. **Parallel pack parsing** - If multiple pack files exist
-5. **Delta cache** - Cache resolved deltas for objects used as bases
+1. **Incremental updates** - Only process new objects since last run
+2. **Memory-mapped output** - For very large repositories
+3. **Parallel pack parsing** - If multiple pack files exist
+4. **Delta cache** - Cache resolved deltas for objects used as bases
 
 ## Dependencies
 
@@ -359,8 +358,6 @@ git-dag-parser query --dag-file dag.bin --query "path:src/main.rs"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 thiserror = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 indicatif = "0.17"

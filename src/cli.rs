@@ -20,10 +20,6 @@ pub enum Commands {
         /// Path to the Git repository (must contain .git directory)
         #[arg(short, long, default_value = ".")]
         repo: PathBuf,
-
-        /// Output file for the parsed DAG (defaults to <repo>/.git-dag.bin)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
     },
 
     /// Analyze the parsed DAG and generate reports
