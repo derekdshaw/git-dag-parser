@@ -20,7 +20,7 @@ fn commit_trees_parents_and_times_match_git() {
         "fixture must contain an unreachable commit"
     );
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     let actual: HashMap<String, CommitInfo> = container
         .commits
@@ -47,7 +47,7 @@ fn annotated_tag_names_and_targets_match_git() {
     let repo = Repo::with_refs_and_merges();
     let expected = repo.git_tags();
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     assert!(
         container
@@ -83,7 +83,7 @@ fn refs_match_git() {
         "fixture must leave a stale main in packed-refs"
     );
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     let actual: HashMap<String, String> = container
         .refs

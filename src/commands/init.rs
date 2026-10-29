@@ -21,14 +21,17 @@ pub fn run(repo_path: &Path, output: &Option<PathBuf>) -> Result<()> {
     // Phase 1: Parse all objects from pack files and loose objects
     info!("Phase 1: Parsing Git objects...");
     let phase1_start = Instant::now();
-    let (commits_raw, trees_raw, hash_index, mut container) =
+    let (commits_raw, trees_raw, names, hash_index, mut container) =
         parser::parse_objects(&git_dir).context("Failed to parse Git objects")?;
     let phase1_elapsed = phase1_start.elapsed();
+    // Phase 2 takes the store, so count it now for the summary
+    let name_count = names.len();
+    let name_bytes = names.total_bytes();
 
     // Phase 2: Walk commit trees and build relationships
     info!("Phase 2: Building relationships...");
     let phase2_start = Instant::now();
-    parser::build_relationships(commits_raw, trees_raw, &hash_index, &mut container)
+    parser::build_relationships(commits_raw, trees_raw, names, &hash_index, &mut container)
         .context("Failed to build relationships")?;
     let phase2_elapsed = phase2_start.elapsed();
 
@@ -40,7 +43,13 @@ pub fn run(repo_path: &Path, output: &Option<PathBuf>) -> Result<()> {
     }
 
     let total_elapsed = start.elapsed();
-    print_summary(&container, phase1_elapsed, phase2_elapsed, total_elapsed);
+    print_summary(
+        &container,
+        (name_count, name_bytes),
+        phase1_elapsed,
+        phase2_elapsed,
+        total_elapsed,
+    );
 
     Ok(())
 }
@@ -92,6 +101,7 @@ fn save_dag(container: &ObjectContainer, path: &Path) -> Result<()> {
 /// Print a summary of the parsed DAG
 fn print_summary(
     container: &ObjectContainer,
+    (name_count, name_bytes): (usize, usize),
     phase1: std::time::Duration,
     phase2: std::time::Duration,
     total: std::time::Duration,
@@ -107,6 +117,11 @@ fn print_summary(
             + container.trees.len()
             + container.blobs.len()
             + container.tags.len()
+    );
+    println!(
+        "Names:   {} distinct, {:.1} KB",
+        name_count,
+        name_bytes as f64 / 1024.0
     );
 
     println!("\n=== Timing ===");

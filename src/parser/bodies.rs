@@ -18,13 +18,15 @@ use super::pack::PackReader;
 use super::scan::Scanned;
 use crate::error::ParseError;
 use crate::models::container::{CommitRaw, ObjectHash, TreeRaw};
-use crate::models::{ObjectId, ObjectKind};
+use crate::models::{NameStore, ObjectId, ObjectKind};
 
 /// Header data of commits and trees, keyed by hash, for relationship
 /// building
 pub struct Bodies {
     pub commits_raw: HashMap<ObjectHash, CommitRaw>,
     pub trees_raw: HashMap<ObjectHash, TreeRaw>,
+    /// The entry names that `trees_raw` refers to
+    pub names: NameStore,
 }
 
 /// Read every commit, tree and tag body and fill in what pass 1 could not
@@ -40,6 +42,7 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
     let mut bodies = Bodies {
         commits_raw: HashMap::with_capacity(scan.container.commits.len()),
         trees_raw: HashMap::with_capacity(scan.container.trees.len()),
+        names: NameStore::new(),
     };
 
     let to_read =
@@ -107,8 +110,8 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
                 bodies.commits_raw.insert(hash, raw);
             }
             ObjectId::Tree(i) => {
-                let entries =
-                    parse_tree(&body).with_context(|| format!("Bad tree {}", hex(&hash)))?;
+                let entries = parse_tree(&body, &mut bodies.names)
+                    .with_context(|| format!("Bad tree {}", hex(&hash)))?;
                 bodies.trees_raw.insert(hash, TreeRaw { index: i, entries });
             }
             ObjectId::Tag(i) => {

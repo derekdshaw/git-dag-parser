@@ -38,6 +38,9 @@ flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 ahash = "0.8"
 hashbrown = { version = "0.14", features = ["serde"] }
 
+# Path name interning
+intaglio = { version = "1.15", default-features = false, features = ["bytes"] }
+
 # CPU count
 num_cpus = "1.17"
 

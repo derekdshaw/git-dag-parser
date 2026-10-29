@@ -6,6 +6,7 @@ use anyhow::Result;
 
 use crate::error::ParseError;
 use crate::models::container::{CommitRaw, ObjectHash, TreeEntry};
+use crate::models::NameStore;
 
 /// Fields of an annotated tag body
 #[derive(Debug)]
@@ -80,8 +81,9 @@ pub fn parse_tag(data: &[u8]) -> Result<TagRaw> {
     })
 }
 
-/// Parse tree body entries: `<octal mode> <name>\0<20-byte hash>`, repeated
-pub fn parse_tree(data: &[u8]) -> Result<Vec<TreeEntry>> {
+/// Parse tree body entries: `<octal mode> <name>\0<20-byte hash>`, repeated.
+/// Entry names are interned in `names`.
+pub fn parse_tree(data: &[u8], names: &mut NameStore) -> Result<Vec<TreeEntry>> {
     let mut entries = Vec::new();
     let mut pos = 0;
 
@@ -101,7 +103,7 @@ pub fn parse_tree(data: &[u8]) -> Result<Vec<TreeEntry>> {
             .position(|&b| b == 0)
             .ok_or_else(|| ParseError::InvalidObjectFormat("tree entry missing null".into()))?;
 
-        let name = data[pos..pos + null_pos].to_vec();
+        let name = names.intern(&data[pos..pos + null_pos])?;
         pos += null_pos + 1;
 
         if pos + 20 > data.len() {
@@ -138,6 +140,8 @@ pub(crate) mod benches {
     use divan::counter::BytesCount;
     use divan::{black_box, Bencher};
 
+    use crate::models::NameStore;
+
     /// A tree body with `entries` regular files, like one large directory.
     /// Each entry is 42 bytes: `100644 file_NNNNNN.rs\0` and a 20-byte hash.
     pub(crate) fn synthetic_tree(entries: usize) -> Vec<u8> {
@@ -154,12 +158,75 @@ pub(crate) mod benches {
 
     // 84,000 entries is about the size of the largest directory in a large
     // monorepo measured during development.
+    //
+    // Every name is new to the store: the cost of interning on a miss.
     #[divan::bench(args = [100, 1_000, 84_000])]
-    fn parse_tree(bencher: Bencher, entries: usize) {
+    fn parse_tree_new_names(bencher: Bencher, entries: usize) {
         let body = synthetic_tree(entries);
         bencher
             .counter(BytesCount::of_slice(&body))
-            .bench_local(|| super::parse_tree(black_box(&body)).unwrap());
+            .with_inputs(NameStore::new)
+            .bench_local_refs(|names| super::parse_tree(black_box(&body), names).unwrap());
+    }
+
+    // Every name is already in the store, as when a later version of a
+    // directory is parsed: the cost of interning on a hit. The store also
+    // holds 100,000 other names, as it would after parsing a large
+    // repository. At 84,000 entries every lookup lands on a different part
+    // of the table: the worst case, not the common one (see
+    // `parse_tree_history`).
+    #[divan::bench(args = [100, 1_000, 84_000])]
+    fn parse_tree_known_names(bencher: Bencher, entries: usize) {
+        let body = synthetic_tree(entries);
+        let mut names = NameStore::new();
+        for i in 0..100_000 {
+            names.intern(format!("other_{i:06}.rs").as_bytes()).unwrap();
+        }
+        super::parse_tree(&body, &mut names).unwrap();
+        bencher
+            .counter(BytesCount::of_slice(&body))
+            .bench_local(|| super::parse_tree(black_box(&body), &mut names).unwrap());
+    }
+
+    /// A tree body for directory `dir` with `entries` regular files whose
+    /// names no other directory uses
+    fn directory_tree(dir: usize, entries: usize) -> Vec<u8> {
+        let mut body = Vec::new();
+        for i in 0..entries {
+            body.extend_from_slice(format!("100644 d{dir:04}_file_{i:02}.rs\0").as_bytes());
+            body.extend_from_slice(&[i as u8; 20]);
+        }
+        body
+    }
+
+    // The common case: many small directories, each parsed in several
+    // versions. 2,000 directories of 50 entries give the store 100,000
+    // names, about as many as linux. The directories come in a scattered
+    // order, and each one is parsed `versions` times in a row, as when the
+    // versions of a directory sit next to each other in a delta chain.
+    // With 1 version no tree reuses the names of the tree before it.
+    #[divan::bench(args = [1, 8])]
+    fn parse_tree_history(bencher: Bencher, versions: usize) {
+        const DIRS: usize = 2_000;
+        const ENTRIES: usize = 50;
+        let bodies: Vec<Vec<u8>> = (0..DIRS).map(|d| directory_tree(d, ENTRIES)).collect();
+        // 7919 is prime, so this visits every directory once
+        let order: Vec<&[u8]> = (0..DIRS)
+            .flat_map(|i| std::iter::repeat_n(bodies[(i * 7919) % DIRS].as_slice(), versions))
+            .collect();
+        let mut names = NameStore::new();
+        for body in &bodies {
+            super::parse_tree(body, &mut names).unwrap();
+        }
+        bencher
+            .counter(BytesCount::new(
+                order.iter().map(|b| b.len()).sum::<usize>(),
+            ))
+            .bench_local(|| {
+                for body in &order {
+                    black_box(super::parse_tree(black_box(body), &mut names).unwrap());
+                }
+            });
     }
 
     #[divan::bench]
@@ -260,14 +327,33 @@ mod tests {
         body.extend_from_slice(b"40000 src\0");
         body.extend_from_slice(&tree_hash);
 
-        let entries = parse_tree(&body).unwrap();
+        let mut names = NameStore::new();
+        let entries = parse_tree(&body, &mut names).unwrap();
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].name, b"caf\xe9.txt");
+        assert_eq!(names.get(entries[0].name), b"caf\xe9.txt");
         assert_eq!(entries[0].hash, blob_hash);
         assert_eq!(entries[0].kind, FileKind::Regular);
-        assert_eq!(entries[1].name, b"src");
+        assert_eq!(names.get(entries[1].name), b"src");
         assert_eq!(entries[1].hash, tree_hash);
         assert_eq!(entries[1].kind, FileKind::Tree);
+    }
+
+    #[test]
+    fn parse_tree_interns_repeated_names_once() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"100644 a\0");
+        body.extend_from_slice(&[1; 20]);
+        body.extend_from_slice(b"100644 b\0");
+        body.extend_from_slice(&[2; 20]);
+        let mut names = NameStore::new();
+
+        let first = parse_tree(&body, &mut names).unwrap();
+        let second = parse_tree(&body, &mut names).unwrap();
+
+        assert_eq!(names.len(), 2);
+        assert_eq!(first[0].name, second[0].name);
+        assert_eq!(first[1].name, second[1].name);
+        assert_ne!(first[0].name, first[1].name);
     }
 }

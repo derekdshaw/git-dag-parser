@@ -16,7 +16,7 @@ fn every_object_matches_git_type_and_sizes() {
         "fixture must contain deltified objects for this test to mean anything"
     );
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     let expected = repo.git_objects();
     let actual = parsed_objects(&container);
@@ -43,7 +43,7 @@ fn objects_in_multiple_packs_are_counted_once() {
         "fixture must have overlapping packs"
     );
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     let parsed: HashMap<String, usize> = [
         ("commit", container.commits.len()),
@@ -62,7 +62,7 @@ fn objects_in_multiple_packs_are_counted_once() {
 fn non_utf8_names_and_messages_are_parsed() {
     let repo = Repo::with_non_utf8();
 
-    let (commits_raw, trees_raw, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (commits_raw, trees_raw, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     assert_eq!(
         commits_raw.len(),
@@ -80,7 +80,7 @@ fn non_utf8_names_and_messages_are_parsed() {
 fn hash_index_points_at_each_object() {
     let repo = Repo::with_history();
 
-    let (_, _, hash_index, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, hash_index, container) = parse_objects(&repo.git_dir()).unwrap();
 
     for c in &container.commits {
         assert_eq!(hash_index.commit(&c.hash), Some(c.index));
@@ -109,7 +109,7 @@ fn packs_match_files_on_disk() {
     assert!(pack_paths.len() >= 2);
     fs::write(pack_paths[1].with_extension("keep"), "").unwrap();
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     assert_eq!(container.packs.len(), pack_paths.len());
     for (i, (pack, path)) in container.packs.iter().zip(&pack_paths).enumerate() {
@@ -137,7 +137,7 @@ fn every_on_disk_copy_is_recorded() {
     let loose_count = repo.loose_object_count();
     assert!(loose_count > 0, "fixture must have loose objects");
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     for pack in &container.packs {
         let in_pack: Vec<_> = container
@@ -216,7 +216,7 @@ fn primary_copy_is_in_the_newest_pack() {
         fs::File::open(path).unwrap().set_modified(time).unwrap();
     }
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     let newest = container
         .packs
@@ -264,7 +264,7 @@ fn primary_copy_is_in_the_newest_pack() {
 fn objects_are_in_hash_order() {
     let repo = Repo::with_overlapping_packs();
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     let commits: Vec<_> = container
         .commits
@@ -315,7 +315,7 @@ fn ids_by_hash(container: &git_dag_parser::models::ObjectContainer) -> HashMap<S
 #[test]
 fn indices_do_not_change_when_packs_are_rewritten() {
     let repo = Repo::with_history();
-    let (_, _, _, before) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, before) = parse_objects(&repo.git_dir()).unwrap();
     let packs_before = repo.pack_files("pack");
 
     // Packs all objects, including the loose ones, into one new pack
@@ -325,7 +325,7 @@ fn indices_do_not_change_when_packs_are_rewritten() {
         packs_before,
         "fixture must rewrite the packs"
     );
-    let (_, _, _, after) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, after) = parse_objects(&repo.git_dir()).unwrap();
 
     assert_eq!(ids_by_hash(&after), ids_by_hash(&before));
 }
@@ -335,7 +335,7 @@ fn copy_disk_sizes_match_verify_pack() {
     let repo = Repo::with_overlapping_packs();
     let expected = repo.verify_pack_entries();
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     let packed: Vec<_> = container.copies.iter().filter(|c| !c.is_loose()).collect();
     assert_eq!(packed.len(), expected.len());
@@ -354,7 +354,7 @@ fn cruft_pack_holds_the_unreachable_blob() {
     let dangling = String::from_utf8(repo.git(&["hash-object", "dangling.txt"])).unwrap();
     let dangling = dangling.trim();
 
-    let (_, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     let cruft: Vec<_> = container.packs.iter().filter(|p| p.cruft).collect();
     assert_eq!(cruft.len(), 1, "one cruft pack");

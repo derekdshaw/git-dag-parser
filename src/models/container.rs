@@ -1,6 +1,7 @@
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 
+use super::name_store::NameId;
 use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, Tag, Tree};
 
 /// Hash type alias for Git object hashes (20 bytes for SHA-1)
@@ -235,9 +236,10 @@ impl FileKind {
 /// A single entry in a tree object
 #[derive(Debug, Clone)]
 pub struct TreeEntry {
-    /// Entry name (filename or directory name), as raw bytes since git
-    /// does not require names to be UTF-8
-    pub name: Vec<u8>,
+    /// Entry name (filename or directory name), interned in the parse's
+    /// `NameStore`. Names are kept as bytes there, since git does not
+    /// require them to be UTF-8.
+    pub name: NameId,
     /// Hash of the referenced object (blob or subtree)
     pub hash: ObjectHash,
     /// Resolved index of the child object (set after all objects are indexed)
@@ -248,7 +250,7 @@ pub struct TreeEntry {
 
 impl TreeEntry {
     /// Create a new tree entry
-    pub fn new(mode: u32, name: Vec<u8>, hash: ObjectHash) -> Self {
+    pub fn new(mode: u32, name: NameId, hash: ObjectHash) -> Self {
         let kind = FileKind::from_mode(mode).unwrap_or(FileKind::Regular);
         Self {
             name,

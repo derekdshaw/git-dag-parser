@@ -29,6 +29,9 @@ pub enum ParseError {
     #[error("Invalid delta instruction")]
     InvalidDeltaInstruction,
 
+    #[error("Too many distinct path names (limit {0})")]
+    TooManyNames(usize),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

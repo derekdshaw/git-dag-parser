@@ -309,7 +309,7 @@ fn parse_matches_git_on_real_repositories() {
     for repo in repos.split(':').filter(|r| !r.is_empty()) {
         let git_dir = git_dir_of(Path::new(repo));
         println!("{repo}");
-        let (_, _, _, container) =
+        let (_, _, _, _, container) =
             parse_objects(&git_dir).unwrap_or_else(|e| panic!("parse of {repo} failed: {e:#}"));
 
         let mut out = Vec::new();

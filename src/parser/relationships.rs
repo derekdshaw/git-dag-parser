@@ -7,13 +7,14 @@ use hashbrown::HashMap;
 use indicatif::ProgressStyle;
 use tracing::info;
 
-use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw, WalkResult};
-use crate::models::ObjectContainer;
+use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeEntry, TreeRaw, WalkResult};
+use crate::models::{NameId, NameStore, ObjectContainer};
 
 /// Shared read-only data passed to worker threads (no cloning, just Arc)
 struct WorkerContext {
     trees_raw: HashMap<ObjectHash, TreeRaw>,
     commits_raw: HashMap<ObjectHash, CommitRaw>,
+    names: NameStore,
 }
 
 /// Build commit↔tree and commit↔blob relationships using parallel workers
@@ -27,6 +28,7 @@ struct WorkerContext {
 pub fn build_relationships(
     commits_raw: HashMap<ObjectHash, CommitRaw>,
     trees_raw: HashMap<ObjectHash, TreeRaw>,
+    names: NameStore,
     _hash_index: &HashIndex,
     container: &mut ObjectContainer,
 ) -> Result<()> {
@@ -48,6 +50,7 @@ pub fn build_relationships(
     let context = Arc::new(WorkerContext {
         trees_raw,
         commits_raw,
+        names,
     });
 
     // Progress bar
@@ -150,13 +153,7 @@ fn diff_commit_tree(
         .and_then(|parent_hash| context.commits_raw.get(parent_hash))
         .and_then(|parent_commit| context.trees_raw.get(&parent_commit.root_tree_hash));
 
-    diff_trees(
-        current_tree,
-        parent_tree,
-        "",
-        &context.trees_raw,
-        &mut result,
-    );
+    diff_trees(current_tree, parent_tree, "", context, &mut result);
 
     result
 }
@@ -169,12 +166,15 @@ fn diff_trees(
     current: &TreeRaw,
     parent: Option<&TreeRaw>,
     path: &str,
-    trees_raw: &HashMap<ObjectHash, TreeRaw>,
+    context: &WorkerContext,
     result: &mut WalkResult,
 ) {
-    // Build a lookup of parent entries by name for fast comparison
-    let parent_entries: Option<HashMap<&[u8], &crate::models::container::TreeEntry>> =
-        parent.map(|p| p.entries.iter().map(|e| (e.name.as_slice(), e)).collect());
+    let trees_raw = &context.trees_raw;
+
+    // Build a lookup of parent entries by name for fast comparison. Names
+    // are interned, so equal names have equal ids.
+    let parent_entries: Option<HashMap<NameId, &TreeEntry>> =
+        parent.map(|p| p.entries.iter().map(|e| (e.name, e)).collect());
 
     // Record this tree as visited
     result.trees_visited.push((current.index, path.to_string()));
@@ -183,7 +183,7 @@ fn diff_trees(
         // Check if this entry exists with the same hash in the parent
         let is_unchanged = parent_entries
             .as_ref()
-            .and_then(|pe| pe.get(entry.name.as_slice()))
+            .and_then(|pe| pe.get(&entry.name))
             .is_some_and(|parent_entry| parent_entry.hash == entry.hash);
 
         if is_unchanged {
@@ -191,7 +191,7 @@ fn diff_trees(
         }
 
         // Paths stay String until path interning; non-UTF-8 names are lossy here.
-        let name = String::from_utf8_lossy(&entry.name);
+        let name = String::from_utf8_lossy(context.names.get(entry.name));
         let child_path = if path.is_empty() {
             name.into_owned()
         } else {
@@ -204,11 +204,11 @@ fn diff_trees(
                 // Find the parent's version of this subtree for narrower diff
                 let parent_subtree = parent_entries
                     .as_ref()
-                    .and_then(|pe| pe.get(entry.name.as_slice()))
+                    .and_then(|pe| pe.get(&entry.name))
                     .filter(|pe| pe.kind.is_tree())
                     .and_then(|pe| trees_raw.get(&pe.hash));
 
-                diff_trees(child_tree, parent_subtree, &child_path, trees_raw, result);
+                diff_trees(child_tree, parent_subtree, &child_path, context, result);
             }
         } else {
             // Blob is new or changed

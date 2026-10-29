@@ -11,7 +11,11 @@ The benchmarks use [divan](https://docs.rs/divan). Each one is defined next to t
 | `pack/delta_result_size_1000` | Pass 1: read the result size of 1,000 compressed deltas |
 | `pack/decompress_data/{4096,65536,1048576}` | Pass 2: inflate tree bodies of 4 KB, 64 KB, and 1 MB |
 | `pack/apply_delta/{4096,65536,1048576}` | Pass 2: rebuild a tree from its base and a delta |
-| `content/parse_tree/{100,1000,84000}` | Parse a tree body with this many entries |
+| `content/parse_tree_new_names/{100,1000,84000}` | Parse a tree body with this many entries, every name new to the `NameStore` (the miss path) |
+| `content/parse_tree_known_names/{100,1000,84000}` | The same, with every name already interned and 100,000 other names in the store (the hit path, as when a later version of a directory is parsed) |
+| `content/parse_tree_history/{1,8}` | Parse 2,000 directories of 50 entries (100,000 names in the store) in a scattered order, each one this many times in a row: the common case, where consecutive trees often share names |
+| `name_store/intern_hit/{1000,10000,100000,1000000}` | Look up every name in a store of this size in a scattered order: the cost of a cold lookup as the table outgrows the caches |
+| `name_store/get/{1000,100000,1000000}` | Get the bytes of every name in a store of this size by id, in the same scattered order |
 | `content/parse_commit` | Parse a merge commit body |
 | `scan/record_and_finish/100000` | Pass 1 bookkeeping: record 100,000 copies, then sort by hash |
 | `parse_objects_repo` | A full parse of a real repository (ignored by default) |
@@ -40,8 +44,9 @@ File names are `<UTC time>-<commit>[-dirty][-<label>]`. `dirty` means the workin
 
 How to read a comparison:
 
+- Only compare runs from the same host. The header of each file records the host, CPU count and kernel.
 - Allocation counts and bytes do not change between runs of the same code. Compare them exactly.
-- Times vary between runs of the same code. Most medians stay within 5%, but some move by 10–35% (`parse_tree`, `delta_result_size_1000`, `apply_delta/65536`, `record_and_finish`). Run each side more than once before you trust a time change, and confirm end-to-end changes with instruction counts from `hyperfine` (below).
+- Times vary between runs of the same code. Most medians stay within 5%, but some move by 10–35% (`parse_tree_*`, `delta_result_size_1000`, `apply_delta/65536`, `record_and_finish`). Run each side more than once before you trust a time change, and confirm end-to-end changes with instruction counts from `hyperfine` (below).
 
 ## Whole-program measurements
 

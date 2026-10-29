@@ -15,14 +15,16 @@ use indicatif::ProgressBar;
 use tracing::{info, Level};
 
 use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
-use crate::models::{ObjectContainer, Ref};
+use crate::models::{NameStore, ObjectContainer, Ref};
 
 pub use relationships::build_relationships;
 
-/// Raw commit and tree data, the hash index, and the container
+/// Raw commit and tree data, the tree entry names, the hash index, and the
+/// container
 pub type ParsedObjects = (
     HashMap<ObjectHash, CommitRaw>,
     HashMap<ObjectHash, TreeRaw>,
+    NameStore,
     HashIndex,
     ObjectContainer,
 );
@@ -37,6 +39,7 @@ pub type ParsedObjects = (
 /// Returns:
 /// - Raw commit data (for tree walking in Phase 2)
 /// - Raw tree data (for tree walking in Phase 2)
+/// - Tree entry names, which the raw tree data refers to by id
 /// - Hash index (for resolving hashes to indices)
 /// - Object container (with empty relationship vectors), with commit trees
 ///   and parents, tag targets and refs resolved to indices
@@ -48,6 +51,7 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
     let bodies::Bodies {
         commits_raw,
         mut trees_raw,
+        names,
     } = bodies::read_bodies(&mut scanned)?;
     // Packs are closed here; everything needed is in memory.
     let scan::Scan {
@@ -77,7 +81,7 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
     build_static_relationships(&trees_raw, &mut container);
     info!("Built static relationships in {:?}", static_start.elapsed());
 
-    Ok((commits_raw, trees_raw, hash_index, container))
+    Ok((commits_raw, trees_raw, names, hash_index, container))
 }
 
 /// A progress bar of `len` steps that draws only when info logging is on.

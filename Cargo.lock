@@ -309,6 +309,7 @@ dependencies = [
  "flate2",
  "hashbrown",
  "indicatif",
+ "intaglio",
  "memmap2",
  "num_cpus",
  "rayon",
@@ -355,6 +356,12 @@ dependencies = [
  "unicode-width",
  "web-time",
 ]
+
+[[package]]
+name = "intaglio"
+version = "1.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca9188c1b20836bb561bc09bb2f54e9ca99b271031b5f3ff183a00c08c98c8"
 
 [[package]]
 name = "is_terminal_polyfill"
