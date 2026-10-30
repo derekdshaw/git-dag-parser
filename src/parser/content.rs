@@ -5,7 +5,7 @@
 use anyhow::Result;
 
 use crate::error::ParseError;
-use crate::models::container::{CommitRaw, ObjectHash, TreeEntry};
+use crate::models::container::{CommitRaw, FileKind, HashIndex, ObjectHash, TreeEntriesBuilder};
 use crate::models::NameStore;
 
 /// Fields of an annotated tag body
@@ -81,10 +81,18 @@ pub fn parse_tag(data: &[u8]) -> Result<TagRaw> {
     })
 }
 
-/// Parse tree body entries: `<octal mode> <name>\0<20-byte hash>`, repeated.
-/// Entry names are interned in `names`.
-pub fn parse_tree(data: &[u8], names: &mut NameStore) -> Result<Vec<TreeEntry>> {
-    let mut entries = Vec::new();
+/// Parse tree body entries: `<octal mode> <name>\0<20-byte hash>`, repeated,
+/// recording them in `out` as the entries of tree `tree`. Entry names are
+/// interned in `names`, and each child hash is resolved to its index in
+/// `index`, which is complete before any body is read.
+pub fn parse_tree(
+    data: &[u8],
+    tree: usize,
+    names: &mut NameStore,
+    index: &HashIndex,
+    out: &mut TreeEntriesBuilder,
+) -> Result<()> {
+    out.begin_tree(tree);
     let mut pos = 0;
 
     while pos < data.len() {
@@ -113,10 +121,18 @@ pub fn parse_tree(data: &[u8], names: &mut NameStore) -> Result<Vec<TreeEntry>> 
         let hash: ObjectHash = data[pos..pos + 20].try_into()?;
         pos += 20;
 
-        entries.push(TreeEntry::new(mode, name, hash));
+        let kind = FileKind::from_mode(mode).unwrap_or(FileKind::Regular);
+        let child = if kind.is_tree() {
+            index.tree(&hash)
+        } else if kind.is_blob() {
+            index.blob(&hash)
+        } else {
+            None // Submodules reference commits in other repositories
+        };
+        out.push(child, name, kind);
     }
 
-    Ok(entries)
+    Ok(())
 }
 
 /// Convert 40 hex digits to a hash
@@ -140,7 +156,27 @@ pub(crate) mod benches {
     use divan::counter::BytesCount;
     use divan::{black_box, Bencher};
 
-    use crate::models::NameStore;
+    use crate::models::container::{HashIndex, TreeEntriesBuilder};
+    use crate::models::{NameStore, ObjectId};
+
+    /// A hash index holding every blob the bodies reference, so child
+    /// lookups hit, as almost all do in a real parse
+    fn blob_index(bodies: &[&[u8]]) -> HashIndex {
+        let mut index = HashIndex::new();
+        for body in bodies {
+            let mut pos = 0;
+            while pos < body.len() {
+                let null = pos + body[pos..].iter().position(|&b| b == 0).unwrap();
+                let hash: [u8; 20] = body[null + 1..null + 21].try_into().unwrap();
+                let next = index.len();
+                if !index.contains(&hash) {
+                    index.insert(hash, ObjectId::Blob(next));
+                }
+                pos = null + 21;
+            }
+        }
+        index
+    }
 
     /// A tree body with `entries` regular files, like one large directory.
     /// Each entry is 42 bytes: `100644 file_NNNNNN.rs\0` and a 20-byte hash.
@@ -163,10 +199,13 @@ pub(crate) mod benches {
     #[divan::bench(args = [100, 1_000, 84_000])]
     fn parse_tree_new_names(bencher: Bencher, entries: usize) {
         let body = synthetic_tree(entries);
+        let index = blob_index(&[&body]);
         bencher
             .counter(BytesCount::of_slice(&body))
-            .with_inputs(NameStore::new)
-            .bench_local_refs(|names| super::parse_tree(black_box(&body), names).unwrap());
+            .with_inputs(|| (NameStore::new(), TreeEntriesBuilder::new(1)))
+            .bench_local_refs(|(names, out)| {
+                super::parse_tree(black_box(&body), 0, names, &index, out).unwrap()
+            });
     }
 
     // Every name is already in the store, as when a later version of a
@@ -178,14 +217,25 @@ pub(crate) mod benches {
     #[divan::bench(args = [100, 1_000, 84_000])]
     fn parse_tree_known_names(bencher: Bencher, entries: usize) {
         let body = synthetic_tree(entries);
+        let index = blob_index(&[&body]);
         let mut names = NameStore::new();
         for i in 0..100_000 {
             names.intern(format!("other_{i:06}.rs").as_bytes()).unwrap();
         }
-        super::parse_tree(&body, &mut names).unwrap();
+        super::parse_tree(
+            &body,
+            0,
+            &mut names,
+            &index,
+            &mut TreeEntriesBuilder::new(1),
+        )
+        .unwrap();
         bencher
             .counter(BytesCount::of_slice(&body))
-            .bench_local(|| super::parse_tree(black_box(&body), &mut names).unwrap());
+            .with_inputs(|| TreeEntriesBuilder::new(1))
+            .bench_local_refs(|out| {
+                super::parse_tree(black_box(&body), 0, &mut names, &index, out).unwrap()
+            });
     }
 
     /// A tree body for directory `dir` with `entries` regular files whose
@@ -210,21 +260,28 @@ pub(crate) mod benches {
         const DIRS: usize = 2_000;
         const ENTRIES: usize = 50;
         let bodies: Vec<Vec<u8>> = (0..DIRS).map(|d| directory_tree(d, ENTRIES)).collect();
+        let body_refs: Vec<&[u8]> = bodies.iter().map(|b| b.as_slice()).collect();
+        let index = blob_index(&body_refs);
         // 7919 is prime, so this visits every directory once
-        let order: Vec<&[u8]> = (0..DIRS)
-            .flat_map(|i| std::iter::repeat_n(bodies[(i * 7919) % DIRS].as_slice(), versions))
+        let order: Vec<(usize, &[u8])> = (0..DIRS)
+            .flat_map(|i| {
+                let dir = (i * 7919) % DIRS;
+                std::iter::repeat_n((dir, bodies[dir].as_slice()), versions)
+            })
             .collect();
         let mut names = NameStore::new();
-        for body in &bodies {
-            super::parse_tree(body, &mut names).unwrap();
+        let mut warm = TreeEntriesBuilder::new(DIRS);
+        for (dir, body) in bodies.iter().enumerate() {
+            super::parse_tree(body, dir, &mut names, &index, &mut warm).unwrap();
         }
         bencher
             .counter(BytesCount::new(
-                order.iter().map(|b| b.len()).sum::<usize>(),
+                order.iter().map(|(_, b)| b.len()).sum::<usize>(),
             ))
-            .bench_local(|| {
-                for body in &order {
-                    black_box(super::parse_tree(black_box(body), &mut names).unwrap());
+            .with_inputs(|| TreeEntriesBuilder::new(DIRS))
+            .bench_local_refs(|out| {
+                for &(dir, body) in &order {
+                    super::parse_tree(black_box(body), dir, &mut names, &index, out).unwrap();
                 }
             });
     }
@@ -245,7 +302,7 @@ pub(crate) mod benches {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::container::FileKind;
+    use crate::models::ObjectId;
 
     const TREE_HEX: &[u8] = b"4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     const PARENT1_HEX: &[u8] = b"0123456789abcdef0123456789abcdef01234567";
@@ -318,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_tree_keeps_names_as_bytes() {
+    fn parse_tree_resolves_children_and_keeps_names_as_bytes() {
         let blob_hash = [0x11; 20];
         let tree_hash = [0x22; 20];
         let mut body = Vec::new();
@@ -327,16 +384,50 @@ mod tests {
         body.extend_from_slice(b"40000 src\0");
         body.extend_from_slice(&tree_hash);
 
+        let mut index = HashIndex::new();
+        index.insert(blob_hash, ObjectId::Blob(4));
+        index.insert(tree_hash, ObjectId::Tree(2));
         let mut names = NameStore::new();
-        let entries = parse_tree(&body, &mut names).unwrap();
+        let mut out = TreeEntriesBuilder::new(1);
+        parse_tree(&body, 0, &mut names, &index, &mut out).unwrap();
+        let entries = out.finish();
 
-        assert_eq!(entries.len(), 2);
-        assert_eq!(names.get(entries[0].name), b"caf\xe9.txt");
-        assert_eq!(entries[0].hash, blob_hash);
-        assert_eq!(entries[0].kind, FileKind::Regular);
-        assert_eq!(names.get(entries[1].name), b"src");
-        assert_eq!(entries[1].hash, tree_hash);
-        assert_eq!(entries[1].kind, FileKind::Tree);
+        let parsed: Vec<_> = entries.entries(0).collect();
+        assert_eq!(parsed.len(), 2);
+        let (child, name, kind) = parsed[0];
+        assert_eq!(names.get(name), b"caf\xe9.txt");
+        assert_eq!((child, kind), (Some(4), FileKind::Regular));
+        let (child, name, kind) = parsed[1];
+        assert_eq!(names.get(name), b"src");
+        assert_eq!((child, kind), (Some(2), FileKind::Tree));
+    }
+
+    #[test]
+    fn parse_tree_leaves_submodules_and_missing_objects_childless() {
+        let submodule_hash = [0x33; 20];
+        let missing_hash = [0x44; 20];
+        let mut body = Vec::new();
+        body.extend_from_slice(b"160000 vendored\0");
+        body.extend_from_slice(&submodule_hash);
+        body.extend_from_slice(b"100644 absent.txt\0");
+        body.extend_from_slice(&missing_hash);
+
+        // The submodule's commit being indexed must not give it a child
+        let mut index = HashIndex::new();
+        index.insert(submodule_hash, ObjectId::Commit(0));
+        let mut names = NameStore::new();
+        let mut out = TreeEntriesBuilder::new(1);
+        parse_tree(&body, 0, &mut names, &index, &mut out).unwrap();
+        let entries = out.finish();
+
+        let kinds: Vec<_> = entries
+            .entries(0)
+            .map(|(child, _, kind)| (child, kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![(None, FileKind::Submodule), (None, FileKind::Regular)]
+        );
     }
 
     #[test]
@@ -346,14 +437,18 @@ mod tests {
         body.extend_from_slice(&[1; 20]);
         body.extend_from_slice(b"100644 b\0");
         body.extend_from_slice(&[2; 20]);
+        let index = HashIndex::new();
         let mut names = NameStore::new();
+        let mut out = TreeEntriesBuilder::new(2);
 
-        let first = parse_tree(&body, &mut names).unwrap();
-        let second = parse_tree(&body, &mut names).unwrap();
+        parse_tree(&body, 0, &mut names, &index, &mut out).unwrap();
+        parse_tree(&body, 1, &mut names, &index, &mut out).unwrap();
+        let entries = out.finish();
 
+        let first: Vec<_> = entries.entries(0).map(|(_, name, _)| name).collect();
+        let second: Vec<_> = entries.entries(1).map(|(_, name, _)| name).collect();
         assert_eq!(names.len(), 2);
-        assert_eq!(first[0].name, second[0].name);
-        assert_eq!(first[1].name, second[1].name);
-        assert_ne!(first[0].name, first[1].name);
+        assert_eq!(first, second);
+        assert_ne!(first[0], first[1]);
     }
 }

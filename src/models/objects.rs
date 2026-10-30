@@ -1,5 +1,3 @@
-use hashbrown::HashSet;
-
 use super::container::ObjectHash;
 
 /// A typed reference to an object: the variant names the container array,
@@ -84,7 +82,7 @@ impl ObjectKind {
     }
 }
 
-/// A Git commit object with its relationships
+/// A Git commit object
 #[derive(Debug, Clone)]
 pub struct Commit {
     /// Index in the commits array (for fast lookups)
@@ -104,10 +102,6 @@ pub struct Commit {
     pub boundary: bool,
     /// Committer timestamp, seconds since the Unix epoch
     pub commit_time: i64,
-    /// Indices of trees this commit references (includes all trees in the tree hierarchy)
-    pub tree_deps: Vec<usize>,
-    /// Indices of blobs this commit references (includes all blobs in the tree hierarchy)
-    pub blob_deps: Vec<usize>,
 }
 
 impl Commit {
@@ -121,13 +115,11 @@ impl Commit {
             parents: Vec::new(),
             boundary: false,
             commit_time: 0,
-            tree_deps: Vec::new(),
-            blob_deps: Vec::new(),
         }
     }
 }
 
-/// A Git tree object with its relationships
+/// A Git tree object
 #[derive(Debug, Clone)]
 pub struct Tree {
     /// Index in the trees array
@@ -138,14 +130,6 @@ pub struct Tree {
     pub size: u64,
     /// Compressed size on disk
     pub size_disk: u64,
-    /// Paths where this tree appears (a tree can appear at multiple paths across commits)
-    pub paths: HashSet<String>,
-    /// Indices of commits that reference this tree
-    pub commits: Vec<usize>,
-    /// Indices of blobs directly contained in this tree (not recursive)
-    pub blobs: Vec<usize>,
-    /// Indices of subtrees directly contained in this tree (not recursive)
-    pub subtrees: Vec<usize>,
 }
 
 impl Tree {
@@ -155,15 +139,11 @@ impl Tree {
             hash,
             size,
             size_disk,
-            paths: HashSet::new(),
-            commits: Vec::new(),
-            blobs: Vec::new(),
-            subtrees: Vec::new(),
         }
     }
 }
 
-/// A Git blob object with its relationships
+/// A Git blob object
 #[derive(Debug, Clone)]
 pub struct Blob {
     /// Index in the blobs array
@@ -174,12 +154,6 @@ pub struct Blob {
     pub size: u64,
     /// Compressed size on disk
     pub size_disk: u64,
-    /// Paths where this blob appears
-    pub paths: HashSet<String>,
-    /// Indices of commits that reference this blob
-    pub commits: Vec<usize>,
-    /// Indices of trees that directly contain this blob
-    pub trees: Vec<usize>,
 }
 
 impl Blob {
@@ -189,9 +163,6 @@ impl Blob {
             hash,
             size,
             size_disk,
-            paths: HashSet::new(),
-            commits: Vec::new(),
-            trees: Vec::new(),
         }
     }
 }
