@@ -114,4 +114,4 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 8 from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/08-reports-and-gc-estimate-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do step 8 from docs/plans/08-reports-and-gc-estimate-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.

@@ -132,4 +132,4 @@ Integration tests (in `tests/`, with new `Repo` fixtures):
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 5 from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/05-commit-rank-and-attribution-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do step 5 from docs/plans/05-commit-rank-and-attribution-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.

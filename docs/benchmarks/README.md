@@ -2,6 +2,8 @@
 
 This folder keeps benchmark results so that changes can be compared with earlier runs. The scripts are in `scripts/benchmarks/`.
 
+`baseline-before-4.1.md` records the whole-program measurements (time, heap, CPU profiles) at commit `e6c013a`, before step 4.1. The divan run from the same commit is `20261028T211041Z-e6c013a-dirty-baseline`.
+
 ## Micro benchmarks (`cargo bench`)
 
 The benchmarks use [divan](https://docs.rs/divan). Each one is defined next to the code it measures, in a `#[cfg(feature = "bench")] mod benches` block, so it can call private functions. `benches/parser.rs` runs them and installs divan's allocation profiler, which reports allocations, reallocations, and bytes for each iteration.
