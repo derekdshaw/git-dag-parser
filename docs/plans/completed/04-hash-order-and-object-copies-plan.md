@@ -129,4 +129,4 @@ Step 4.1 (memory and I/O at scale): compact tree entries, a name store, a delta 
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 4 from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/04-hash-order-and-object-copies-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do step 4 from docs/plans/completed/04-hash-order-and-object-copies-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.

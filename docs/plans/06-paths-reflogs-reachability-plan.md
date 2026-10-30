@@ -146,4 +146,4 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 6 from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/06-paths-reflogs-reachability-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do step 6 from docs/plans/06-paths-reflogs-reachability-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.

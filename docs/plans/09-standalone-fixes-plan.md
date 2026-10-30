@@ -69,7 +69,7 @@ Also, the `HEAD` of each linked worktree can keep commits alive. `git gc` uses t
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix A (linked worktrees) from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do fix A (linked worktrees) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 
@@ -107,7 +107,7 @@ Step 4 adds `Pack` and `ObjectCopy` records. This fix adds an `external` flag to
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix B (alternates) from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do fix B (alternates) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 
@@ -137,7 +137,7 @@ Do not add SHA-256 support. Stop with a clear error. SHA-256 support is a large 
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix C (SHA-256 repositories) from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do fix C (SHA-256 repositories) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 
@@ -161,7 +161,7 @@ Step 4.1 part 2 (commit `eacf1b0`) removed `relationships.rs`. On 2026-10-30, `i
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix D (empty repository) from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do fix D (empty repository) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 
@@ -196,7 +196,7 @@ What remains: after step 5, describe "introduced by" and the commit rank (correc
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix E (documentation) from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/09-standalone-fixes-plan.md. Show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do fix E (documentation) from docs/plans/09-standalone-fixes-plan.md. Show me the diff, and do not commit until I approve.
 
 ---
 
@@ -221,7 +221,7 @@ The parser uses `indicatif` progress bars. `indicatif` hides a progress bar when
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix F (progress without a terminal) from /home/derekdshaw/r/personal/notes/git-dag-parser/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do fix F (progress without a terminal) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 
