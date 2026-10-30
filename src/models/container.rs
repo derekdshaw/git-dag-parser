@@ -246,8 +246,8 @@ impl FileKind {
 /// The entries of every tree, as parallel arrays indexed by entry position.
 /// Tree `t`'s entries are at positions `start[t]..start[t + 1]`, in body
 /// order. Children are stored as resolved indices, not hashes, so an entry
-/// is about 9 bytes: for a history like linux (~393 million entries) that
-/// is about 3.5 GB.
+/// is about 9 bytes: for a history like linux (~528 million entries) that
+/// is about 4.7 GB.
 #[derive(Debug, Default)]
 pub struct TreeEntries {
     /// Position of each tree's first entry, by tree index, with a final

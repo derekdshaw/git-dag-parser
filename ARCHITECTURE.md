@@ -202,7 +202,7 @@ mode:  [1, 0, 4, 1, ...]           FileKind, one byte
 
 The entries of tree `t` are at positions `start[t]..start[t + 1]`, in the sequence of the tree body. `TreeEntries::entries(t)` gives each entry as (child index, `NameId`, `FileKind`). The `FileKind` tells if the child index is a tree index or a blob index.
 
-Each entry uses 9 bytes: 4 bytes for the child, 4 bytes for the name, and 1 byte for the kind. A large history can have more than 100 million tree entries. For example, the Linux history has approximately 393 million tree entries, which use approximately 3.5 GB.
+Each entry uses 9 bytes: 4 bytes for the child, 4 bytes for the name, and 1 byte for the kind. A large history can have more than 100 million tree entries. For example, the Linux history has approximately 528 million tree entries, which use approximately 4.7 GB.
 
 ### NameStore
 
