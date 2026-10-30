@@ -51,12 +51,6 @@ A trial repair of all three (in a temporary copy, not committed) made all tests 
 - `Repo` gets `git_with_input(args, input)`, which writes `input` to the stdin of `git`. `git(args)` calls it with no input.
 - The test opens the pack file with the attribute-write right on Windows (`OpenOptionsExt::access_mode(FILE_WRITE_ATTRIBUTES)`, value `0x100`) and with `File::open` on other platforms.
 
-## Decision needed before this step
-
-Ask the user to select:
-
-1. **Archive contents.** engraph puts install scripts and a document in each archive. This project has none. Recommended: the binary, `README.md`, and `LICENSE` only.
-
 ## Decisions already made
 
 - A merge to `main` never publishes a release. The user publishes a release with a manual run of the workflow (Actions tab, "Run workflow", or `gh workflow run ci.yml --ref main`). This is different from engraph, which tags and publishes on each push to `main` that has a new version.
@@ -73,6 +67,7 @@ Ask the user to select:
   | `x86_64-pc-windows-msvc` | `windows-latest` | `zip` |
 
 - Archive names: `git-dag-parser-v<version>-<target>.<tar.gz|zip>`.
+- Each archive contains only the binary, `README.md`, and `LICENSE`. engraph also packages install scripts and a document. This project has none.
 - Make the tests portable. Do not skip tests on Windows or macOS.
 - Do not copy the engraph jobs `codegraph-live` and `otel-build`. Add a `bench` job in their place (see item 4).
 
@@ -99,7 +94,7 @@ The jobs:
 6. **Job `build-release`.** Copy the matrix and the steps from the engraph job, with these changes:
    - `needs: [test, bench, version]`, and no `if`. It runs on pull requests, on pushes to `main`, and on manual runs.
    - Change `--bin engraph` to `--bin git-dag-parser`.
-   - In the package steps, copy only the binary, `README.md`, and `LICENSE` (or what the user selects). Use the version from the `version` job in the archive name.
+   - In the package steps, copy only the binary, `README.md`, and `LICENSE`. Use the version from the `version` job in the archive name.
    - In `actions/upload-artifact`, set `retention-days: 7`. These files are not a release.
 7. **Job `publish-release`.** Replaces the engraph jobs `tag-and-release` and `publish-release`:
    - `if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'`, `needs: [version, build-release]`, `permissions: contents: write`.
@@ -138,4 +133,4 @@ The jobs:
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 10 from docs/plans/10-github-ci-and-releases-plan.md. Ask me the decision first. Then make the tests portable, show me the diff, and do not commit until I approve.
+> In /home/derekdshaw/r/git-dag-parser, do step 10 from docs/plans/10-github-ci-and-releases-plan.md. Make the tests portable first, show me the diff, and do not commit until I approve.
