@@ -6,7 +6,7 @@ use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, Tag, Tree};
 /// Hash type alias for Git object hashes (20 bytes for SHA-1)
 pub type ObjectHash = [u8; 20];
 
-/// Container for all parsed Git objects and their relationships
+/// Container for all parsed Git objects
 #[derive(Debug, Default)]
 pub struct ObjectContainer {
     /// All commit objects
@@ -164,15 +164,6 @@ pub struct CommitRaw {
     pub commit_time: i64,
 }
 
-/// Raw tree data extracted during Phase 1 parsing
-#[derive(Debug, Clone)]
-pub struct TreeRaw {
-    /// Index in the ObjectContainer.trees array
-    pub index: usize,
-    /// Entries in this tree (files and subdirectories)
-    pub entries: Vec<TreeEntry>,
-}
-
 /// Git file mode constants
 pub mod mode {
     pub const TREE: u32 = 0o040000;
@@ -182,20 +173,21 @@ pub mod mode {
     pub const SUBMODULE: u32 = 0o160000;
 }
 
-/// The kind of object a tree entry references
+/// The kind of object a tree entry references. One byte, since every tree
+/// entry stores one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
+#[repr(u8)]
 pub enum FileKind {
     /// Directory (tree object)
-    Tree = mode::TREE,
+    Tree = 0,
     /// Regular file
-    Regular = mode::REGULAR,
+    Regular = 1,
     /// Executable file
-    Executable = mode::EXECUTABLE,
+    Executable = 2,
     /// Symbolic link
-    Symlink = mode::SYMLINK,
+    Symlink = 3,
     /// Gitlink (submodule reference)
-    Submodule = mode::SUBMODULE,
+    Submodule = 4,
 }
 
 impl FileKind {
@@ -209,6 +201,20 @@ impl FileKind {
             mode::SYMLINK => Some(Self::Symlink),
             mode::SUBMODULE => Some(Self::Submodule),
             _ => None,
+        }
+    }
+
+    /// The kind stored as `kind as u8`. Only `TreeEntries` stores kinds as
+    /// bytes, so this stays in this module.
+    #[inline]
+    fn from_byte(byte: u8) -> Self {
+        match byte {
+            0 => Self::Tree,
+            1 => Self::Regular,
+            2 => Self::Executable,
+            3 => Self::Symlink,
+            4 => Self::Submodule,
+            _ => unreachable!("byte came from `FileKind as u8`"),
         }
     }
 
@@ -227,57 +233,162 @@ impl FileKind {
     /// Returns the raw mode value
     #[inline]
     pub fn mode(self) -> u32 {
-        self as u32
-    }
-}
-
-/// A single entry in a tree object
-#[derive(Debug, Clone)]
-pub struct TreeEntry {
-    /// Entry name (filename or directory name), interned in the parse's
-    /// `NameStore`. Names are kept as bytes there, since git does not
-    /// require them to be UTF-8.
-    pub name: NameId,
-    /// Hash of the referenced object (blob or subtree)
-    pub hash: ObjectHash,
-    /// Resolved index of the child object (set after all objects are indexed)
-    pub child_idx: Option<usize>,
-    /// The kind of entry (tree, regular file, executable, symlink, submodule)
-    pub kind: FileKind,
-}
-
-impl TreeEntry {
-    /// Create a new tree entry
-    pub fn new(mode: u32, name: NameId, hash: ObjectHash) -> Self {
-        let kind = FileKind::from_mode(mode).unwrap_or(FileKind::Regular);
-        Self {
-            name,
-            hash,
-            child_idx: None,
-            kind,
+        match self {
+            Self::Tree => mode::TREE,
+            Self::Regular => mode::REGULAR,
+            Self::Executable => mode::EXECUTABLE,
+            Self::Symlink => mode::SYMLINK,
+            Self::Submodule => mode::SUBMODULE,
         }
     }
 }
 
-/// Result of walking a single commit's tree (returned by worker threads)
+/// The entries of every tree, as parallel arrays indexed by entry position.
+/// Tree `t`'s entries are at positions `start[t]..start[t + 1]`, in body
+/// order. Children are stored as resolved indices, not hashes, so an entry
+/// is about 9 bytes: for a history like linux (~393 million entries) that
+/// is about 3.5 GB.
+#[derive(Debug, Default)]
+pub struct TreeEntries {
+    /// Position of each tree's first entry, by tree index, with a final
+    /// entry-count sentinel: `start.len()` is the tree count plus one
+    start: Vec<u64>,
+    /// Index of the entry's child among trees or blobs (`kind` says which);
+    /// `NO_CHILD` for a submodule or a child that is not in the store
+    child: Vec<u32>,
+    /// The entry's name
+    name: Vec<NameId>,
+    /// The entry's `FileKind`, as one byte
+    mode: Vec<u8>,
+}
+
+impl TreeEntries {
+    /// `child` value for an entry whose child has no index: a submodule, or
+    /// an object missing from the store
+    pub const NO_CHILD: u32 = u32::MAX;
+
+    /// Number of trees
+    pub fn len(&self) -> usize {
+        self.start.len().saturating_sub(1)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Number of entries across all trees
+    pub fn entry_count(&self) -> usize {
+        self.child.len()
+    }
+
+    /// The entries of tree `tree` in body order, as (child, name, kind).
+    /// The child is an index among trees if the kind is a tree, otherwise
+    /// among blobs; None for a submodule or a child not in the store.
+    #[inline]
+    pub fn entries(
+        &self,
+        tree: usize,
+    ) -> impl Iterator<Item = (Option<usize>, NameId, FileKind)> + '_ {
+        let range = self.start[tree] as usize..self.start[tree + 1] as usize;
+        range.map(move |e| {
+            let child = self.child[e];
+            (
+                (child != Self::NO_CHILD).then_some(child as usize),
+                self.name[e],
+                FileKind::from_byte(self.mode[e]),
+            )
+        })
+    }
+}
+
+/// Builds a `TreeEntries`. Trees can be recorded in any order, since pass 2
+/// reads them pack by pack in offset order; `finish` lays the entries out
+/// in tree index order. A tree that is never recorded has no entries.
 #[derive(Debug)]
-pub struct WalkResult {
-    /// Index of the commit that was walked
-    pub commit_idx: usize,
-    /// Trees visited during the walk: (tree_idx, path)
-    pub trees_visited: Vec<(usize, String)>,
-    /// Blobs visited during the walk: (blob_idx, path)
-    pub blobs_visited: Vec<(usize, String)>,
+pub struct TreeEntriesBuilder {
+    /// Entries in the order they were recorded; `finish` reorders them
+    child: Vec<u32>,
+    name: Vec<NameId>,
+    mode: Vec<u8>,
+    /// Each tree's entries in the arrival arrays: (first position, count)
+    span: Vec<(u64, u32)>,
+    /// The tree entries are currently recorded for, with its first position
+    open: Option<(usize, u64)>,
 }
 
-impl WalkResult {
-    pub fn new(commit_idx: usize) -> Self {
+impl TreeEntriesBuilder {
+    /// A builder for the entries of `trees` trees
+    pub fn new(trees: usize) -> Self {
         Self {
-            commit_idx,
-            trees_visited: Vec::new(),
-            blobs_visited: Vec::new(),
+            child: Vec::new(),
+            name: Vec::new(),
+            mode: Vec::new(),
+            span: vec![(0, 0); trees],
+            open: None,
         }
     }
+
+    /// Start recording the entries of `tree`: pushes until the next
+    /// `begin_tree` or `finish` belong to it.
+    pub fn begin_tree(&mut self, tree: usize) {
+        self.close();
+        self.open = Some((tree, self.child.len() as u64));
+    }
+
+    /// Add the next entry of the tree begun last
+    pub fn push(&mut self, child: Option<usize>, name: NameId, kind: FileKind) {
+        debug_assert!(self.open.is_some(), "push requires begin_tree");
+        self.child.push(match child {
+            Some(i) => u32::try_from(i).expect("child index fits in u32"),
+            None => TreeEntries::NO_CHILD,
+        });
+        self.name.push(name);
+        self.mode.push(kind as u8);
+    }
+
+    /// Record the span of the tree being recorded, if any
+    fn close(&mut self) {
+        if let Some((tree, begin)) = self.open.take() {
+            let count = self.child.len() as u64 - begin;
+            self.span[tree] = (
+                begin,
+                u32::try_from(count).expect("tree entry count fits in u32"),
+            );
+        }
+    }
+
+    /// Lay the entries out in tree index order. The arrays are reordered
+    /// one at a time, each source freed right after, to limit peak memory.
+    pub fn finish(mut self) -> TreeEntries {
+        self.close();
+        let mut start = Vec::with_capacity(self.span.len() + 1);
+        let mut total = 0u64;
+        start.push(0);
+        for &(_, count) in &self.span {
+            total += u64::from(count);
+            start.push(total);
+        }
+        let child = reorder(&self.span, std::mem::take(&mut self.child));
+        let name = reorder(&self.span, std::mem::take(&mut self.name));
+        let mode = reorder(&self.span, std::mem::take(&mut self.mode));
+        TreeEntries {
+            start,
+            child,
+            name,
+            mode,
+        }
+    }
+}
+
+/// The elements of `source` picked out span by span, dropping `source`
+fn reorder<T: Copy>(spans: &[(u64, u32)], source: Vec<T>) -> Vec<T> {
+    let total: usize = spans.iter().map(|&(_, count)| count as usize).sum();
+    let mut out = Vec::with_capacity(total);
+    for &(begin, count) in spans {
+        let begin = begin as usize;
+        out.extend_from_slice(&source[begin..begin + count as usize]);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -323,6 +434,86 @@ mod tests {
         assert_eq!(index.tree(&[1; 20]), None);
         assert_eq!(index.commit(&[2; 20]), None);
         assert_eq!(index.blob(&[9; 20]), None);
+    }
+
+    /// Intern `name` in `store`
+    fn name(store: &mut crate::models::NameStore, name: &[u8]) -> NameId {
+        store.intern(name).unwrap()
+    }
+
+    #[test]
+    fn tree_entries_lays_trees_out_in_index_order() {
+        let mut names = crate::models::NameStore::new();
+        let (a, b, c) = (
+            name(&mut names, b"a"),
+            name(&mut names, b"b"),
+            name(&mut names, b"c"),
+        );
+
+        // Recorded out of index order, as pass 2 does
+        let mut builder = TreeEntriesBuilder::new(3);
+        builder.begin_tree(2);
+        builder.push(Some(7), c, FileKind::Symlink);
+        builder.begin_tree(0);
+        builder.push(Some(1), a, FileKind::Tree);
+        builder.push(Some(5), b, FileKind::Executable);
+        builder.begin_tree(1);
+        let entries = builder.finish();
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.entry_count(), 3);
+        assert_eq!(
+            entries.entries(0).collect::<Vec<_>>(),
+            vec![
+                (Some(1), a, FileKind::Tree),
+                (Some(5), b, FileKind::Executable)
+            ]
+        );
+        assert_eq!(entries.entries(1).count(), 0, "tree 1 is empty");
+        assert_eq!(
+            entries.entries(2).collect::<Vec<_>>(),
+            vec![(Some(7), c, FileKind::Symlink)]
+        );
+    }
+
+    #[test]
+    fn tree_entries_childless_entry_has_no_child() {
+        let mut names = crate::models::NameStore::new();
+        let n = name(&mut names, b"sub");
+
+        let mut builder = TreeEntriesBuilder::new(1);
+        builder.begin_tree(0);
+        builder.push(None, n, FileKind::Submodule);
+        let entries = builder.finish();
+
+        assert_eq!(
+            entries.entries(0).collect::<Vec<_>>(),
+            vec![(None, n, FileKind::Submodule)]
+        );
+    }
+
+    #[test]
+    fn tree_entries_never_recorded_tree_is_empty() {
+        let entries = TreeEntriesBuilder::new(2).finish();
+        assert_eq!(entries.len(), 2);
+        assert!(!entries.is_empty());
+        assert_eq!(entries.entry_count(), 0);
+        assert_eq!(entries.entries(0).count(), 0);
+        assert_eq!(entries.entries(1).count(), 0);
+    }
+
+    #[test]
+    fn file_kind_survives_the_byte_roundtrip() {
+        for kind in [
+            FileKind::Tree,
+            FileKind::Regular,
+            FileKind::Executable,
+            FileKind::Symlink,
+            FileKind::Submodule,
+        ] {
+            assert_eq!(FileKind::from_byte(kind as u8), kind);
+            assert_eq!(FileKind::from_mode(kind.mode()), Some(kind));
+        }
     }
 
     #[test]

@@ -3,27 +3,23 @@ mod content;
 mod loose;
 mod pack;
 mod refs;
-mod relationships;
 mod scan;
 
 use std::path::Path;
-use std::time::Instant;
 
 use anyhow::Result;
 use hashbrown::HashMap;
 use indicatif::ProgressBar;
-use tracing::{info, Level};
+use tracing::Level;
 
-use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeRaw};
+use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeEntries};
 use crate::models::{NameStore, ObjectContainer, Ref};
 
-pub use relationships::build_relationships;
-
-/// Raw commit and tree data, the tree entry names, the hash index, and the
-/// container
+/// Raw commit data, every tree's entries, the tree entry names, the hash
+/// index, and the container
 pub type ParsedObjects = (
     HashMap<ObjectHash, CommitRaw>,
-    HashMap<ObjectHash, TreeRaw>,
+    TreeEntries,
     NameStore,
     HashIndex,
     ObjectContainer,
@@ -34,23 +30,22 @@ pub type ParsedObjects = (
 /// Two passes over the object store:
 /// 1. Headers only, packs in offset order: every object, its kind and
 ///    sizes, every on-disk copy, and which copy is primary.
-/// 2. Bodies of commits, trees and tags from their primary copies.
+/// 2. Bodies of commits, trees and tags from their primary copies. Tree
+///    entry children are resolved to indices as the bodies are read, since
+///    pass 1 indexed every object.
 ///
 /// Returns:
-/// - Raw commit data (for tree walking in Phase 2)
-/// - Raw tree data (for tree walking in Phase 2)
-/// - Tree entry names, which the raw tree data refers to by id
+/// - Raw commit data
+/// - Every tree's entries
+/// - Tree entry names, which the tree entries refer to by id
 /// - Hash index (for resolving hashes to indices)
-/// - Object container (with empty relationship vectors), with commit trees
-///   and parents, tag targets and refs resolved to indices
-///
-/// Static relationships (tree→blob, tree→subtree, blob→tree) are also
-/// built here since they're inherent to the tree structure.
+/// - Object container, with commit trees and parents, tag targets and refs
+///   resolved to indices
 pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
     let mut scanned = scan::scan_repository(git_dir)?;
     let bodies::Bodies {
         commits_raw,
-        mut trees_raw,
+        tree_entries,
         names,
     } = bodies::read_bodies(&mut scanned)?;
     // Packs are closed here; everything needed is in memory.
@@ -60,14 +55,6 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
         ..
     } = scanned.scan;
 
-    // Resolve tree entry indices now that all objects are indexed
-    let resolve_start = Instant::now();
-    resolve_tree_entries(&mut trees_raw, &hash_index);
-    info!(
-        "Resolved tree entry indices in {:?}",
-        resolve_start.elapsed()
-    );
-
     resolve_commits(&commits_raw, &hash_index, &mut container);
     resolve_tags(&hash_index, &mut container);
     for (name, target_hash) in refs::read_refs(git_dir)? {
@@ -76,12 +63,7 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
         container.refs.push(r);
     }
 
-    // Build static tree↔blob relationships
-    let static_start = Instant::now();
-    build_static_relationships(&trees_raw, &mut container);
-    info!("Built static relationships in {:?}", static_start.elapsed());
-
-    Ok((commits_raw, trees_raw, names, hash_index, container))
+    Ok((commits_raw, tree_entries, names, hash_index, container))
 }
 
 /// A progress bar of `len` steps that draws only when info logging is on.
@@ -92,21 +74,6 @@ fn progress_bar(len: u64) -> ProgressBar {
         ProgressBar::new(len)
     } else {
         ProgressBar::hidden()
-    }
-}
-
-/// Resolve tree entry child indices after all objects have been indexed
-fn resolve_tree_entries(trees_raw: &mut HashMap<ObjectHash, TreeRaw>, hash_index: &HashIndex) {
-    for tree_raw in trees_raw.values_mut() {
-        for entry in &mut tree_raw.entries {
-            entry.child_idx = if entry.kind.is_tree() {
-                hash_index.tree(&entry.hash)
-            } else if entry.kind.is_blob() {
-                hash_index.blob(&entry.hash)
-            } else {
-                None // Submodules reference external commits
-            };
-        }
     }
 }
 
@@ -133,31 +100,6 @@ fn resolve_commits(
 fn resolve_tags(hash_index: &HashIndex, container: &mut ObjectContainer) {
     for tag in &mut container.tags {
         tag.target = hash_index.get(&tag.target_hash);
-    }
-}
-
-/// Build static relationships that are inherent to the tree structure
-/// These don't depend on which commits reference the trees
-fn build_static_relationships(
-    trees_raw: &HashMap<ObjectHash, TreeRaw>,
-    container: &mut ObjectContainer,
-) {
-    for tree_raw in trees_raw.values() {
-        let tree_idx = tree_raw.index;
-
-        for entry in &tree_raw.entries {
-            if let Some(child_idx) = entry.child_idx {
-                if entry.kind.is_tree() {
-                    // Tree → Subtree relationship
-                    container.trees[tree_idx].subtrees.push(child_idx);
-                } else {
-                    // Tree → Blob relationship (regular files, executables, symlinks)
-                    container.trees[tree_idx].blobs.push(child_idx);
-                    // Blob → Tree relationship (reverse)
-                    container.blobs[child_idx].trees.push(tree_idx);
-                }
-            }
-        }
     }
 }
 

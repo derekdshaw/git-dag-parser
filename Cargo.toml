@@ -21,7 +21,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.17"
 
 # Concurrency
-crossbeam-channel = "0.5"
 rayon = "1.10"
 
 # Memory mapping
@@ -39,9 +38,6 @@ intaglio = { version = "1.15", default-features = false, features = ["bytes"] }
 
 # CPU count
 num_cpus = "1.17"
-
-# CPU pinning (optional, for worker thread affinity)
-core_affinity = "0.8"
 
 # Benchmarks (`cargo bench --features bench`). A regular optional dependency,
 # not a dev-dependency: the benchmarks live in the library next to the code

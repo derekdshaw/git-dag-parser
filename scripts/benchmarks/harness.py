@@ -47,10 +47,7 @@ def duration_s(text: str) -> float:
 PHASES = {
     "pass1_s": r"Pass 1 \(headers\):.* in (\S+)$",
     "pass2_s": r"Pass 2 \(bodies\):.* in (\S+)$",
-    "resolve_s": r"Resolved tree entry indices in (\S+)$",
-    "static_s": r"Built static relationships in (\S+)$",
-    "phase1_s": r"Phase 1 \(parse\):\s+(\S+)$",
-    "phase2_s": r"Phase 2 \(relationships\):\s+(\S+)$",
+    "parse_s": r"^Parse:\s+(\S+)$",
     "total_s": r"^Total:\s+(\S+)$",
 }
 
@@ -130,9 +127,8 @@ def main() -> None:
     if result.get("pass1_s") is not None and result.get("pass2_s") is not None:
         p1 = result["pass1_s"]
         p2 = p1 + result["pass2_s"]
-        ph1 = result.get("phase1_s") or p2
         end = result.get("total_s") or wall
-        windows = {"pass1": (0, p1), "pass2": (p1, p2), "resolve_refs_static": (p2, ph1), "phase2": (ph1, end + 1)}
+        windows = {"pass1": (0, p1), "pass2": (p1, p2), "resolve_refs": (p2, end + 1)}
         for name, (lo, hi) in windows.items():
             vals = [a for t, a in timeline if lo <= t < hi]
             result[f"peak_anon_mb_{name}"] = round(max(vals) / 1024, 1) if vals else None

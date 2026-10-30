@@ -5,10 +5,10 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use crate::error::DagError;
-use crate::models::ObjectContainer;
+use crate::models::{NameStore, ObjectContainer};
 use crate::parser;
 
-/// Run the init command: parse a Git repository and build the DAG
+/// Run the init command: parse a Git repository and summarize what it holds
 pub fn run(repo_path: &Path) -> Result<()> {
     let start = Instant::now();
 
@@ -18,31 +18,14 @@ pub fn run(repo_path: &Path) -> Result<()> {
     let git_dir = find_git_dir(repo_path)?;
     info!("Found .git directory: {}", git_dir.display());
 
-    // Phase 1: Parse all objects from pack files and loose objects
-    info!("Phase 1: Parsing Git objects...");
-    let phase1_start = Instant::now();
-    let (commits_raw, trees_raw, names, hash_index, mut container) =
+    // Parse all objects from pack files and loose objects
+    info!("Parsing Git objects...");
+    let parse_start = Instant::now();
+    let (_commits_raw, _tree_entries, names, _hash_index, container) =
         parser::parse_objects(&git_dir).context("Failed to parse Git objects")?;
-    let phase1_elapsed = phase1_start.elapsed();
-    // Phase 2 takes the store, so count it now for the summary
-    let name_count = names.len();
-    let name_bytes = names.total_bytes();
+    let parse_elapsed = parse_start.elapsed();
 
-    // Phase 2: Walk commit trees and build relationships
-    info!("Phase 2: Building relationships...");
-    let phase2_start = Instant::now();
-    parser::build_relationships(commits_raw, trees_raw, names, &hash_index, &mut container)
-        .context("Failed to build relationships")?;
-    let phase2_elapsed = phase2_start.elapsed();
-
-    let total_elapsed = start.elapsed();
-    print_summary(
-        &container,
-        (name_count, name_bytes),
-        phase1_elapsed,
-        phase2_elapsed,
-        total_elapsed,
-    );
+    print_summary(&container, &names, parse_elapsed, start.elapsed());
 
     Ok(())
 }
@@ -81,12 +64,11 @@ fn find_git_dir(repo_path: &Path) -> Result<PathBuf> {
     Err(DagError::NotAGitRepo(repo_path.display().to_string()).into())
 }
 
-/// Print a summary of the parsed DAG
+/// Print a summary of the parsed objects
 fn print_summary(
     container: &ObjectContainer,
-    (name_count, name_bytes): (usize, usize),
-    phase1: std::time::Duration,
-    phase2: std::time::Duration,
+    names: &NameStore,
+    parse: std::time::Duration,
     total: std::time::Duration,
 ) {
     println!("\n=== DAG Summary ===");
@@ -103,12 +85,11 @@ fn print_summary(
     );
     println!(
         "Names:   {} distinct, {:.1} KB",
-        name_count,
-        name_bytes as f64 / 1024.0
+        names.len(),
+        names.total_bytes() as f64 / 1024.0
     );
 
     println!("\n=== Timing ===");
-    println!("Phase 1 (parse):          {:?}", phase1);
-    println!("Phase 2 (relationships):  {:?}", phase2);
-    println!("Total:                    {:?}", total);
+    println!("Parse:  {:?}", parse);
+    println!("Total:  {:?}", total);
 }

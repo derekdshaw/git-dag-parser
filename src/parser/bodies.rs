@@ -17,15 +17,15 @@ use super::loose::read_loose_object;
 use super::pack::PackReader;
 use super::scan::Scanned;
 use crate::error::ParseError;
-use crate::models::container::{CommitRaw, ObjectHash, TreeRaw};
+use crate::models::container::{CommitRaw, ObjectHash, TreeEntries, TreeEntriesBuilder};
 use crate::models::{NameStore, ObjectId, ObjectKind};
 
-/// Header data of commits and trees, keyed by hash, for relationship
-/// building
+/// Commit headers, tree entries, and the names the entries refer to
 pub struct Bodies {
     pub commits_raw: HashMap<ObjectHash, CommitRaw>,
-    pub trees_raw: HashMap<ObjectHash, TreeRaw>,
-    /// The entry names that `trees_raw` refers to
+    /// Every tree's entries, with children resolved to indices
+    pub tree_entries: TreeEntries,
+    /// The entry names that `tree_entries` refers to
     pub names: NameStore,
 }
 
@@ -39,11 +39,10 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
         objects_dir,
     } = scanned;
 
-    let mut bodies = Bodies {
-        commits_raw: HashMap::with_capacity(scan.container.commits.len()),
-        trees_raw: HashMap::with_capacity(scan.container.trees.len()),
-        names: NameStore::new(),
-    };
+    let mut commits_raw: HashMap<ObjectHash, CommitRaw> =
+        HashMap::with_capacity(scan.container.commits.len());
+    let mut trees = TreeEntriesBuilder::new(scan.container.trees.len());
+    let mut names = NameStore::new();
 
     let to_read =
         scan.container.commits.len() + scan.container.trees.len() + scan.container.tags.len();
@@ -107,12 +106,11 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
             ObjectId::Commit(i) => {
                 let raw =
                     parse_commit(&body, i).with_context(|| format!("Bad commit {}", hex(&hash)))?;
-                bodies.commits_raw.insert(hash, raw);
+                commits_raw.insert(hash, raw);
             }
             ObjectId::Tree(i) => {
-                let entries = parse_tree(&body, &mut bodies.names)
+                parse_tree(&body, i, &mut names, &scan.index, &mut trees)
                     .with_context(|| format!("Bad tree {}", hex(&hash)))?;
-                bodies.trees_raw.insert(hash, TreeRaw { index: i, entries });
             }
             ObjectId::Tag(i) => {
                 let raw = parse_tag(&body).with_context(|| format!("Bad tag {}", hex(&hash)))?;
@@ -129,15 +127,21 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
     }
 
     progress.finish_and_clear();
+    let tree_entries = trees.finish();
     info!(
-        "Pass 2 (bodies): {} commits, {} trees, {} tags in {:?}",
-        bodies.commits_raw.len(),
-        bodies.trees_raw.len(),
+        "Pass 2 (bodies): {} commits, {} trees ({} entries), {} tags in {:?}",
+        commits_raw.len(),
+        tree_entries.len(),
+        tree_entries.entry_count(),
         scan.container.tags.len(),
         start.elapsed()
     );
 
-    Ok(bodies)
+    Ok(Bodies {
+        commits_raw,
+        tree_entries,
+        names,
+    })
 }
 
 fn log_cache(pack_name: &str, reader: &PackReader) {

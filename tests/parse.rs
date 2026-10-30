@@ -62,18 +62,65 @@ fn objects_in_multiple_packs_are_counted_once() {
 fn non_utf8_names_and_messages_are_parsed() {
     let repo = Repo::with_non_utf8();
 
-    let (commits_raw, trees_raw, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let (commits_raw, tree_entries, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
 
     assert_eq!(
         commits_raw.len(),
         container.commits.len(),
         "every commit should have its header parsed"
     );
-    assert_eq!(
-        trees_raw.len(),
-        container.trees.len(),
-        "every tree should have its entries parsed"
-    );
+    for tree in &container.trees {
+        assert_eq!(
+            tree_entries.entries(tree.index).count() > 0,
+            tree.size > 0,
+            "tree {} should have its entries parsed",
+            hex(&tree.hash)
+        );
+    }
+}
+
+/// Each tree's entries, read through `TreeEntries` and the name store, equal
+/// `git ls-tree` of that tree: same order, names, modes and child hashes.
+#[test]
+fn tree_entries_match_git_ls_tree() {
+    for repo in [
+        Repo::with_history(),
+        Repo::with_non_utf8(),
+        Repo::with_refs_and_merges(),
+    ] {
+        let (_, tree_entries, names, _, container) = parse_objects(&repo.git_dir()).unwrap();
+
+        for tree in &container.trees {
+            let ours: Vec<(u32, Vec<u8>, String)> = tree_entries
+                .entries(tree.index)
+                .map(|(child, name, kind)| {
+                    let child = child.expect("fixtures have no submodules or missing objects");
+                    let hash = if kind.is_tree() {
+                        container.trees[child].hash
+                    } else {
+                        container.blobs[child].hash
+                    };
+                    (kind.mode(), names.get(name).to_vec(), hex(&hash))
+                })
+                .collect();
+
+            // `<mode> <type> <hash>\t<name>\0`, repeated
+            let listing = repo.git(&["ls-tree", "-z", &hex(&tree.hash)]);
+            let git: Vec<(u32, Vec<u8>, String)> = listing
+                .split(|&b| b == 0)
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    let tab = line.iter().position(|&b| b == b'\t').unwrap();
+                    let meta = std::str::from_utf8(&line[..tab]).unwrap();
+                    let fields: Vec<&str> = meta.split(' ').collect();
+                    let mode = u32::from_str_radix(fields[0], 8).unwrap();
+                    (mode, line[tab + 1..].to_vec(), fields[2].to_string())
+                })
+                .collect();
+
+            assert_eq!(ours, git, "entries of tree {}", hex(&tree.hash));
+        }
+    }
 }
 
 #[test]
