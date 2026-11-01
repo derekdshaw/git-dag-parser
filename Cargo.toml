@@ -2,6 +2,7 @@
 name = "git-dag-parser"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "Fast Git DAG parser that directly reads Git object store to build relationship graphs"
 license = "MIT"
 

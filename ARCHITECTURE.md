@@ -313,4 +313,6 @@ The tests are at three levels:
 - Integration tests in `tests/` make small repositories with `git`. They compare the result of the parser with the output of `git`.
 - The `git_oracle` test parses large repositories and compares the result with `git`. It runs only when you tell Cargo to run it.
 
+The CI workflow runs the unit tests and the integration tests on Linux, macOS, and Windows. It does not run `git_oracle` or the benchmarks.
+
 The benchmarks are in `#[cfg(feature = "bench")]` modules in the source files. For more data, refer to [docs/benchmarks/README.md](docs/benchmarks/README.md).
