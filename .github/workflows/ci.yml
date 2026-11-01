@@ -181,7 +181,7 @@ jobs:
           echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: git-dag-parser-${{ matrix.target }}
           path: ${{ env.ARCHIVE }}
@@ -215,13 +215,13 @@ jobs:
           git push origin ${{ needs.version.outputs.version }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           path: artifacts/
           merge-multiple: true
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.version }}
           files: artifacts/*
