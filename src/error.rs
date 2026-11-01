@@ -22,7 +22,6 @@ pub enum ParseError {
     #[error("Object not found: {0}")]
     ObjectNotFound(String),
 
-    #[allow(dead_code)]
     #[error("Delta base not found at offset {0}")]
     DeltaBaseNotFound(u64),
 

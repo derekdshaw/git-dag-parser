@@ -26,7 +26,7 @@ const OBJ_OFS_DELTA: u8 = 6;
 const OBJ_REF_DELTA: u8 = 7;
 
 /// Maximum delta chain depth to prevent infinite recursion
-const MAX_DELTA_DEPTH: usize = 64;
+pub(super) const MAX_DELTA_DEPTH: usize = 64;
 
 /// Block size for the delta arena (64 MB per block)
 const ARENA_BLOCK_SIZE: usize = 64 * 1024 * 1024;
@@ -181,13 +181,41 @@ pub struct ScannedEntry {
     pub is_delta: bool,
 }
 
+/// The base of each entry of one pack, by position
+#[derive(Debug, Default)]
+pub struct DeltaGraph {
+    /// Position of each entry's base; `NO_BASE` for an entry that is not a delta
+    base: Vec<u32>,
+}
+
+impl DeltaGraph {
+    pub const NO_BASE: u32 = u32::MAX;
+
+    #[cfg(test)]
+    pub(super) fn from_bases(base: Vec<u32>) -> Self {
+        Self { base }
+    }
+
+    /// Number of entries
+    pub fn len(&self) -> usize {
+        self.base.len()
+    }
+
+    /// Position of the base of the entry at `pos`, or None if the entry is not a delta
+    pub fn base(&self, pos: usize) -> Option<usize> {
+        let base = self.base[pos];
+        (base != Self::NO_BASE).then_some(base as usize)
+    }
+}
+
 /// Read every entry's header in offset order, so the pack is touched
 /// sequentially from front to back. Nothing is inflated except the first
 /// few bytes of each delta, which hold the result size.
 ///
 /// Scanning in offset order also means an OFS delta's base has always been
 /// seen already, so its kind is a lookup rather than a walk up the chain.
-pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<Vec<ScannedEntry>> {
+/// The returned graph gives the position of each delta's base.
+pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<(Vec<ScannedEntry>, DeltaGraph)> {
     if pack_data.len() < 12 + 20 {
         return Err(anyhow!("Pack file too small"));
     }
@@ -200,6 +228,7 @@ pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<Vec<ScannedEntry
     // Kind of each entry in `order`, filled as the scan proceeds
     let mut kinds: Vec<Option<ObjectKind>> = vec![None; order.len()];
     let mut entries = Vec::with_capacity(order.len());
+    let mut base = Vec::with_capacity(order.len());
     let mut inflater = Decompress::new(true);
 
     for (pos, &i) in order.iter().enumerate() {
@@ -213,18 +242,27 @@ pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<Vec<ScannedEntry
             OBJ_OFS_DELTA | OBJ_REF_DELTA => {
                 let (base_offset, payload_start) =
                     delta_base(pack_data, index, offset, obj_type, data_start)?;
-                let kind = match offsets.binary_search(&(base_offset as u64)) {
-                    Ok(p) if kinds[p].is_some() => kinds[p].unwrap(),
+                // A base offset that is not the start of an entry means the
+                // pack is damaged
+                let p = offsets
+                    .binary_search(&(base_offset as u64))
+                    .map_err(|_| ParseError::DeltaBaseNotFound(base_offset as u64))?;
+                let kind = match kinds[p] {
+                    Some(kind) => kind,
                     // A REF delta may point forward to a base not yet scanned
-                    _ => pack_kind(resolved_type(pack_data, index, base_offset)?)?,
+                    None => pack_kind(resolved_type(pack_data, index, base_offset)?)?,
                 };
+                base.push(p as u32);
                 (
                     kind,
                     delta_result_size(&mut inflater, &pack_data[payload_start..])?,
                     true,
                 )
             }
-            _ => (pack_kind(obj_type)?, obj_size, false),
+            _ => {
+                base.push(DeltaGraph::NO_BASE);
+                (pack_kind(obj_type)?, obj_size, false)
+            }
         };
 
         kinds[pos] = Some(kind);
@@ -238,7 +276,7 @@ pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<Vec<ScannedEntry
         });
     }
 
-    Ok(entries)
+    Ok((entries, DeltaGraph { base }))
 }
 
 /// Kind for a non-delta pack type code
@@ -913,6 +951,29 @@ mod tests {
                 },
             )
         }
+
+        /// Write the pack and a version 2 `.idx` for it into `pack_dir`
+        fn write(self, pack_dir: &Path) {
+            let (data, index) = self.finish();
+            let mut idx = b"\xfftOc".to_vec();
+            idx.extend_from_slice(&2u32.to_be_bytes());
+            for byte in 0..=255u8 {
+                let count = index.entries.iter().filter(|e| e.hash[0] <= byte).count();
+                idx.extend_from_slice(&(count as u32).to_be_bytes());
+            }
+            for e in &index.entries {
+                idx.extend_from_slice(&e.hash);
+            }
+            for e in &index.entries {
+                idx.extend_from_slice(&e.crc32.to_be_bytes());
+            }
+            for e in &index.entries {
+                idx.extend_from_slice(&(e.offset as u32).to_be_bytes());
+            }
+            std::fs::create_dir_all(pack_dir).unwrap();
+            std::fs::write(pack_dir.join("pack-test.pack"), data).unwrap();
+            std::fs::write(pack_dir.join("pack-test.idx"), idx).unwrap();
+        }
     }
 
     #[test]
@@ -925,7 +986,7 @@ mod tests {
         let (data, index) = pack.finish();
         let pack_end = (data.len() - 20) as u64;
 
-        let entries = scan_pack(&data, &index).unwrap();
+        let (entries, _) = scan_pack(&data, &index).unwrap();
 
         let offsets: Vec<u64> = entries.iter().map(|e| e.offset).collect();
         assert_eq!(offsets, vec![o_blob, o_tree, o_commit]);
@@ -960,7 +1021,7 @@ mod tests {
         let o_commit = pack.add([6; 20], OBJ_COMMIT, b"tree ...\n");
         let (data, index) = pack.finish();
 
-        let entries = scan_pack(&data, &index).unwrap();
+        let (entries, _) = scan_pack(&data, &index).unwrap();
 
         let by_offset = |o: u64| entries.iter().find(|e| e.offset == o).unwrap();
         let base = by_offset(o_base);
@@ -1010,7 +1071,7 @@ mod tests {
         pack.add_corrupt([2; 20], OBJ_TREE, 77);
         let (data, index) = pack.finish();
 
-        let entries = scan_pack(&data, &index).unwrap();
+        let (entries, _) = scan_pack(&data, &index).unwrap();
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].size, 123_456);
@@ -1026,6 +1087,75 @@ mod tests {
         let err = scan_pack(&data, &index).unwrap_err().to_string();
 
         assert!(err.contains("eeeeeeee"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn delta_graph_gives_the_position_of_each_base() {
+        let mut pack = PackBuilder::new();
+        let o_blob = pack.add([1; 20], OBJ_BLOB, b"base blob");
+        // Position 1: OFS delta on position 0
+        pack.add_ofs_delta([2; 20], o_blob, b"ofs result");
+        // Position 2: REF delta on position 0, a base before it
+        pack.add_ref_delta([3; 20], [1; 20], b"ref back");
+        // Position 3: REF delta on position 4, a base after it
+        pack.add_ref_delta([4; 20], [5; 20], b"ref forward");
+        pack.add([5; 20], OBJ_TREE, b"later tree");
+        let (data, index) = pack.finish();
+
+        let (entries, graph) = scan_pack(&data, &index).unwrap();
+
+        assert_eq!(graph.len(), 5);
+        let bases: Vec<Option<usize>> = (0..graph.len()).map(|p| graph.base(p)).collect();
+        assert_eq!(bases, vec![None, Some(0), Some(0), Some(4), None]);
+        assert_eq!(entries[3].kind, ObjectKind::Tree, "kind of the later base");
+    }
+
+    #[test]
+    fn scan_pack_rejects_ofs_delta_into_the_middle_of_an_entry() {
+        let mut pack = PackBuilder::new();
+        let o_blob = pack.add([1; 20], OBJ_BLOB, b"base blob");
+        pack.add_ofs_delta([2; 20], o_blob + 1, b"bad base");
+        let (data, index) = pack.finish();
+
+        let err = scan_pack(&data, &index).unwrap_err();
+
+        match err.downcast_ref::<ParseError>() {
+            Some(ParseError::DeltaBaseNotFound(offset)) => assert_eq!(*offset, o_blob + 1),
+            _ => panic!("unexpected error: {err}"),
+        }
+    }
+
+    #[test]
+    fn a_delta_chain_too_deep_for_the_simulation_does_not_stop_the_parse() {
+        // 65 empty trees. Each is a REF delta to the next one, so the first
+        // read walks the whole chain and the simulation stops at
+        // MAX_DELTA_DEPTH. Pass 2 can read a chain of this length.
+        let n = MAX_DELTA_DEPTH + 1;
+        let hash = |i: usize| [i as u8 + 1; 20];
+        let mut pack = PackBuilder::new();
+        for i in 0..n - 1 {
+            pack.add_ref_delta(hash(i), hash(i + 1), b"");
+        }
+        pack.add(hash(n - 1), OBJ_TREE, b"");
+        let dir = tempfile::tempdir().unwrap();
+        pack.write(&dir.path().join("objects/pack"));
+        std::fs::write(dir.path().join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let (_, tree_entries, _, _, container) = crate::parser::parse_objects(dir.path()).unwrap();
+        assert_eq!(container.trees.len(), n);
+        assert_eq!(tree_entries.entry_count(), 0);
+
+        // The simulation of the same pack fails
+        let scanned = crate::parser::scan::scan_repository(dir.path()).unwrap();
+        let open = &scanned.packs[0];
+        let copies = &scanned.scan.container.copies[open.first_copy..];
+        let reads = crate::parser::delta_cache::pack_reads(copies);
+        let err =
+            crate::parser::delta_cache::simulate_cache(&open.graph, reads, |_| 1).unwrap_err();
+        assert!(
+            err.to_string().contains("too deep"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

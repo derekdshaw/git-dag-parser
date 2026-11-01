@@ -13,11 +13,12 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::content::hex_to_hash;
+use super::delta_cache::{pack_reads, simulate_cache};
 use super::loose::read_loose_header;
-use super::pack::{scan_pack, verify_pack_header, PackIndex};
+use super::pack::{scan_pack, verify_pack_header, DeltaGraph, PackIndex};
 use crate::models::container::{HashIndex, ObjectHash};
 use crate::models::{
     Blob, Commit, ObjectContainer, ObjectCopy, ObjectId, ObjectKind, Pack, Tag, Tree,
@@ -306,6 +307,11 @@ pub struct OpenPack {
     pub file: PackFile,
     pub index: PackIndex,
     pub data: Mmap,
+    /// Position in `container.copies` of the pack's first entry. The entry
+    /// at position `i` of the pack is the copy at `first_copy + i`.
+    pub first_copy: usize,
+    /// The base of each delta in the pack, by position
+    pub graph: DeltaGraph,
 }
 
 /// The result of pass 1, with the packs still open for pass 2
@@ -330,7 +336,13 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
             .with_context(|| format!("Failed to parse index of {}", file.pack.name))?;
         let data = unsafe { Mmap::map(&fs::File::open(&file.pack_path)?)? };
         verify_pack_header(&data).with_context(|| format!("Bad pack {}", file.pack.name))?;
-        packs.push(OpenPack { file, index, data });
+        packs.push(OpenPack {
+            file,
+            index,
+            data,
+            first_copy: 0,
+            graph: DeltaGraph::default(),
+        });
     }
     let loose_files = list_loose_objects(&objects_dir)?;
 
@@ -350,12 +362,13 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
     );
 
     // Step 2: pack headers in offset order
-    for open in &packs {
+    for open in &mut packs {
         let pack_start = Instant::now();
         let pack = &open.file.pack;
-        for entry in scan_pack(&open.data, &open.index)
-            .with_context(|| format!("Failed to scan {}", pack.name))?
-        {
+        let (entries, graph) = scan_pack(&open.data, &open.index)
+            .with_context(|| format!("Failed to scan {}", pack.name))?;
+        open.first_copy = scan.container.copies.len();
+        for entry in entries {
             scan.record(ScannedCopy {
                 hash: entry.hash,
                 kind: entry.kind,
@@ -367,6 +380,11 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
                 mtime: pack.mtime,
             });
         }
+        debug_assert_eq!(
+            scan.container.copies.len() - open.first_copy,
+            open.index.entries.len()
+        );
+        open.graph = graph;
         info!(
             "Scanned {} ({:.2} MB, {} entries) in {:?}",
             pack.name,
@@ -405,6 +423,39 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
         c.copies.len(),
         start.elapsed()
     );
+
+    // After the pass 1 time, so that the simulation is not part of it
+    let sim_start = Instant::now();
+    for open in &packs {
+        let copies = &c.copies[open.first_copy..open.first_copy + open.index.entries.len()];
+        // The simulation is only a diagnostic, and pass 2 has its own depth
+        // check, so a failure does not stop the parse
+        let sim = match simulate_cache(&open.graph, pack_reads(copies), |pos| {
+            c.object_size(copies[pos].object())
+        }) {
+            Ok(sim) => sim,
+            Err(e) => {
+                warn!(
+                    "{}: delta cache simulation stopped: {e:#}",
+                    open.file.pack.name
+                );
+                continue;
+            }
+        };
+        let deltas = (0..open.graph.len())
+            .filter(|&pos| open.graph.base(pos).is_some())
+            .count();
+        info!(
+            "{}: {} deltas, {} requests, simulated delta cache peak {:.2} MB ({} entries), {} left",
+            open.file.pack.name,
+            deltas,
+            sim.requests,
+            sim.peak_bytes as f64 / (1024.0 * 1024.0),
+            sim.peak_entries,
+            sim.left
+        );
+    }
+    info!("Delta cache simulation: {:?}", sim_start.elapsed());
 
     Ok(Scanned {
         scan,

@@ -72,6 +72,16 @@ impl ObjectContainer {
             ObjectId::Tag(i) => self.tags[i].hash,
         }
     }
+
+    /// Inflated size of the object an id refers to
+    pub fn object_size(&self, id: ObjectId) -> u64 {
+        match id {
+            ObjectId::Commit(i) => self.commits[i].size,
+            ObjectId::Tree(i) => self.trees[i].size,
+            ObjectId::Blob(i) => self.blobs[i].size,
+            ObjectId::Tag(i) => self.tags[i].size,
+        }
+    }
 }
 
 /// Index for looking up objects by hash. One map for all kinds, since pass
@@ -555,5 +565,15 @@ mod tests {
 
         assert_eq!(container.hash_of(ObjectId::Tree(0)), [5; 20]);
         assert_eq!(container.hash_of(ObjectId::Tag(0)), [6; 20]);
+    }
+
+    #[test]
+    fn object_size_reads_the_right_container() {
+        let mut container = ObjectContainer::new();
+        container.blobs.push(Blob::new(0, [1; 20], 7, 0));
+        container.trees.push(Tree::new(0, [5; 20], 11, 0));
+
+        assert_eq!(container.object_size(ObjectId::Blob(0)), 7);
+        assert_eq!(container.object_size(ObjectId::Tree(0)), 11);
     }
 }

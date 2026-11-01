@@ -1,5 +1,6 @@
 mod bodies;
 mod content;
+mod delta_cache;
 mod loose;
 mod pack;
 mod refs;
