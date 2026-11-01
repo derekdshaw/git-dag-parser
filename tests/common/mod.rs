@@ -8,9 +8,9 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use git_dag_parser::models::container::ObjectHash;
 use git_dag_parser::models::ObjectContainer;
@@ -101,11 +101,16 @@ impl Repo {
         let repo = Self::new();
         repo.write("readme.txt", "hello\n");
         repo.commit("first");
-        repo.write(OsStr::from_bytes(b"caf\xe9.txt"), "latin-1 name\n");
+        // Only the index gets the Latin-1 name: APFS and Windows do not
+        // accept a file name that is not UTF-8.
+        let blob = repo.git_with_input(&["hash-object", "-w", "--stdin"], b"latin-1 name\n");
+        let blob = String::from_utf8(blob).unwrap();
+        let mut entry = format!("100644 {}\t", blob.trim()).into_bytes();
+        entry.extend_from_slice(b"caf\xe9.txt\n");
+        repo.git_with_input(&["update-index", "--add", "--index-info"], &entry);
         // Without a declared encoding git re-encodes the message to UTF-8;
         // with one it stores the bytes as given, as older repos have them.
         fs::write(&repo.msg_file, b"caf\xe9 latin-1 message\n").unwrap();
-        repo.git(&["add", "-A"]);
         repo.git(&[
             "-c",
             "i18n.commitEncoding=ISO-8859-1",
@@ -115,7 +120,10 @@ impl Repo {
             repo.msg_file.to_str().unwrap(),
         ]);
         repo.write("after.txt", "after\n");
-        repo.commit("third");
+        // `git add -A` would remove the Latin-1 entry, which is not on disk.
+        fs::write(&repo.msg_file, "third").unwrap();
+        repo.git(&["add", "after.txt"]);
+        repo.git(&["commit", "-q", "-F", repo.msg_file.to_str().unwrap()]);
         repo.git(&["repack", "-a", "-d", "-q"]);
         repo
     }
@@ -181,11 +189,16 @@ impl Repo {
 
     /// Run git in the work tree with a hermetic config. Panics on failure.
     pub fn git(&self, args: &[&str]) -> Vec<u8> {
+        self.git_with_input(args, &[])
+    }
+
+    /// `git`, with `input` written to the stdin of git.
+    pub fn git_with_input(&self, args: &[&str], input: &[u8]) -> Vec<u8> {
         let now = self.clock.get() + 100;
         self.clock.set(now);
         // Author time differs from committer time so a parser reading the
         // wrong one is caught.
-        let out = Command::new("git")
+        let mut child = Command::new("git")
             .current_dir(&self.work)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -194,8 +207,14 @@ impl Repo {
             .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
             .args(["-c", "gc.auto=0", "-c", "commit.gpgsign=false"])
             .args(args)
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("git must be installed to run these tests");
+        // Dropping stdin after the write closes it, so git sees the end.
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let out = child.wait_with_output().unwrap();
         assert!(
             out.status.success(),
             "git {args:?} failed: {}",

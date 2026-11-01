@@ -259,8 +259,19 @@ fn primary_copy_is_in_the_newest_pack() {
         } else {
             now
         };
-        // Packs are written read-only; the owner may still set times.
-        fs::File::open(path).unwrap().set_modified(time).unwrap();
+        // Packs are written read-only. On Unix the owner may still set times
+        // through a read-only handle; Windows needs FILE_WRITE_ATTRIBUTES.
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .access_mode(0x100)
+                .open(path)
+                .unwrap()
+        };
+        #[cfg(not(windows))]
+        let file = fs::File::open(path).unwrap();
+        file.set_modified(time).unwrap();
     }
 
     let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();

@@ -26,6 +26,35 @@ cargo build --release
 
 The program is `target/release/git-dag-parser`.
 
+## Release archives
+
+Each GitHub release has one archive for each of these platforms:
+
+| Platform | Target | Archive |
+|---|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` | `tar.gz` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `tar.gz` |
+| macOS x86_64 | `x86_64-apple-darwin` | `tar.gz` |
+| macOS ARM64 | `aarch64-apple-darwin` | `tar.gz` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` | `zip` |
+
+The name of each archive is `git-dag-parser-v<version>-<target>.<tar.gz|zip>`. Each archive contains the program, `README.md`, and `LICENSE`.
+
+### Publish a release
+
+A merge to `main` does not publish a release. To publish a release, do these steps:
+
+1. Change `version` in the `[package]` section of `Cargo.toml`. Merge the change to `main`.
+2. Start the CI workflow manually on `main`. Use "Run workflow" on the Actions tab, or use this command:
+
+   ```
+   gh workflow run ci.yml --ref main
+   ```
+
+The workflow builds the five archives. Then it makes the tag `v<version>` on the commit that it built, and publishes the release with the archives. If the tag exists, the workflow stops with an error. It does not change a tag that exists.
+
+For each pull request and each push to `main`, the workflow also builds the five archives as a test. It does not make a tag or a release. The archives are workflow artifacts, and GitHub deletes them after 7 days.
+
 ## Parse a repository
 
 To parse a repository, use this command:
@@ -84,6 +113,8 @@ cargo test
 
 - The unit tests are in the source files, in `#[cfg(test)]` modules.
 - The integration tests are in `tests/`. Each test makes a small repository with `git`. Then it compares the parser output with the output of `git`.
+
+For each pull request and each push to `main`, the CI workflow (`.github/workflows/ci.yml`) runs the tests, `cargo clippy`, and `cargo fmt --check` on Linux, macOS, and Windows.
 
 The `git_oracle` test parses large repositories and compares the result with `git`. Cargo does not run this test unless you tell it to, because the test uses repositories that are not in the project. To run it, use this command:
 
