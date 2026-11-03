@@ -17,7 +17,7 @@ With paths, the tool can answer "which directory made the most tree versions". W
 
 ## Project and status before this step
 
-- Repository: `/home/derekdshaw/r/git-dag-parser` (Rust, binary and library crate).
+- Repository: this repository (Rust, binary and library crate).
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
 - Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 5 (commit rank and owner).
 - Data that this step uses:
@@ -43,11 +43,11 @@ With paths, the tool can answer "which directory made the most tree versions". W
 - Do not keep the full path bytes in memory. Do not make a second `NameStore` for paths. Make the full bytes from the parent chain only when you need them: for the sort in item 4, and for the database write in step 7.
 - Give path ids in the sort order of the full path bytes. Then the ids do not change between runs.
 - `ObjectContainer` does not hold a `NameId`. The paths go in the parse result struct (step 4.1, part 8), next to `TreeEntries` and the `NameStore`. `Tree` and `Blob` keep only the path id.
-- An object gets its path from its introducing parent. If there are many introducing parents, use the lowest (tree index, entry index). Tree indices are in hash order (step 4), so the result does not change between runs.
+- An object gets its path from its introducing parent. If there are many introducing parents, use the lowest (tree index, entry index). Tree indices are in hash order, so the result does not change between runs.
 - A tree edge stores the entry name, not a path id. One tree can be at many paths, so a path is a fact about the object owner, not about the edge.
 - Reflogs are not an object type. Reflog entries are roots for reachability, the same as refs.
 - The stash reflog (`logs/refs/stash`) holds older stash entries. Read it like other reflogs.
-- The index is a root, the same as refs and reflogs. A test monorepo had an index with 154,900 entries and a `TREE` extension.
+- The index is a root, the same as refs and reflogs. A large monorepo can have an index with 154,900 entries and a `TREE` extension.
 - Liveness order: `Unreachable < ReflogOnly < IndexOnly < Ref`. A reflog entry expires. An index entry stays until the user changes the index.
 
 ## Why the introducing parent always exists
@@ -126,7 +126,7 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 
 ## Make sure the result is correct on real repositories
 
-- Use a small program in the session scratchpad. Run the reachability oracle on `engraph`, `agent-work-visualizer`, `mnemosyne`, `home-auction`, and `git-dag-parser` in `/home/derekdshaw/r`.
+- Use a small program in the session scratchpad. Run the reachability oracle on this repository and on the repositories in `docs/benchmarks/README.md`.
 - Report the bytes in each liveness state for each repository.
 
 ## Out of scope
@@ -146,4 +146,4 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 6 from docs/plans/06-paths-reflogs-reachability-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In this repository, do step 6 from docs/plans/06-paths-reflogs-reachability-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.

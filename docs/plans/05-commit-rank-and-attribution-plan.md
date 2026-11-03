@@ -14,14 +14,14 @@ This step finds the commit that added each tree and each blob. This commit is th
 
 ## Project and status before this step
 
-- Repository: `/home/derekdshaw/r/git-dag-parser` (Rust, binary and library crate).
+- Repository: this repository (Rust, binary and library crate).
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
 - Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse).
 - Data that this step uses:
   - `Commit.tree` (index of the root tree), `Commit.parents`, `Commit.boundary`, `Commit.commit_time`, `Commit.hash`.
   - `TreeEntries` (step 4.1): flat arrays `start`, `child` (`u32`), `name` (`NameId`), and `mode`. Use `entries(tree)` to read the entries of one tree.
-  - Indices are in hash order (step 4).
-- Memory: the large test monorepo has approximately 3.9 million trees, 4.9 million blobs, and 1.2 billion tree entries (an estimate at 50 bytes of tree data for each entry; on linux the real count was 528 million, 34% more than this estimate gave, so plan for about 1.6 billion). Do not copy the entries. Use only `u32` and atomic `u32` arrays with one value for each object.
+  - Indices are in hash order.
+- Memory: a large monorepo can have approximately 3.9 million trees, 4.9 million blobs, and 1.2 billion tree entries (an estimate at 50 bytes of tree data for each entry; on linux the real count was 528 million, 34% more than this estimate gave, so plan for about 1.6 billion). Do not copy the entries. Use only `u32` and atomic `u32` arrays with one value for each object.
 - Step 4.1 removed `build_relationships` (`src/parser/relationships.rs`, `WalkResult`, `Commit.tree_deps`, `Commit.blob_deps`, `Tree.commits`, `Blob.commits`, `Tree.paths`, `Blob.paths`). At this time, `init` runs only the parse. This step adds the rank and owner calculation after the parse.
 
 ## Words used in this plan
@@ -74,7 +74,7 @@ A commit can reach `o` only if `o` is its root tree, or if the commit can reach 
    4. Put all trees with in-degree 0 into the first frontier. This includes trees that no commit reaches.
    5. For each round, process the frontier trees in parallel (`rayon`). For each entry of tree `T`:
       - Do `owner[child].fetch_min(owner[T])`.
-      - A tree with many entries (the test monorepo has one with approximately 84,000) is a large unit of work. Process its entries in parallel chunks.
+      - A tree with many entries (a large monorepo can have one with approximately 84,000) is a large unit of work. Process its entries in parallel chunks.
       - If the child is a tree, decrease its in-degree by 1. If the in-degree becomes 0, put the child in the next frontier.
    6. Stop when the frontier is empty.
    7. Ignore submodule entries and entries with `child == u32::MAX`.
@@ -111,9 +111,9 @@ Integration tests (in `tests/`, with new `Repo` fixtures):
 
 ## Make sure the result is correct on real repositories
 
-- Use a small program in the session scratchpad. Run oracle 2 on `engraph`, `agent-work-visualizer`, `mnemosyne`, `home-auction`, and `git-dag-parser` in `/home/derekdshaw/r`.
+- Use a small program in the session scratchpad. Run oracle 2 on this repository and on the repositories in `docs/benchmarks/README.md`.
 - Run the harness on vscode and git-ms. Compare the time of the rank and owner calculation with the old `build_relationships` (harness, commit `b50d421`): vscode 8.0 s, git-ms 10.3 s.
-- Run the new phase on the large test monorepo with a watchdog on `RssAnon` (see step 4.1). Do not write to that repository. Record the number of frontier rounds, the time, the peak `RssAnon`, and the number of commits where the corrected date is not equal to the committer time.
+- Run the new phase on linux (see `docs/benchmarks/README.md`) with a watchdog on `RssAnon` (see step 4.1). Do not write to that repository. Record the number of frontier rounds, the time, the peak `RssAnon`, and the number of commits where the corrected date is not equal to the committer time.
 
 ## Out of scope
 
@@ -132,4 +132,4 @@ Integration tests (in `tests/`, with new `Repo` fixtures):
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 5 from docs/plans/05-commit-rank-and-attribution-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In this repository, do step 5 from docs/plans/05-commit-rank-and-attribution-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.

@@ -21,7 +21,7 @@ Measured 2026-10-27 on commit `e6c013a` ("Shrink ObjectCopy from 72 to 32 bytes"
 | Build | `cargo build --release` with the project profile (`opt-level = 3`, `lto = true`, `codegen-units = 1`) plus `CARGO_PROFILE_RELEASE_DEBUG=true` (symbols only) |
 | Command | `git-dag-parser init --repo <path>` with no `--output`, so nothing is written. `RUST_LOG=warn`. |
 | `/mnt/d` storage | 9p (drvfs) mount of Windows `D:`. Sequential read 133 MB/s. First random read about 0.6 ms. About 1.8 ms per small file (metadata). |
-| Native storage | ext4 inside the WSL VM (`/dev/sdd`). Copies of `.git` in `~/perfrepos/{lage,zed,git-ms,vscode,linux}` (6.7 GB). Keep them for the 4.1 comparison. |
+| Native storage | ext4 inside the WSL VM (`/dev/sdd`). Copies of the `.git` folders of lage, zed, git-ms, vscode, and linux (6.7 GB). Keep them for the 4.1 comparison. `docs/benchmarks/README.md` gives the URL and the commit of each repository. |
 | Tools | `hyperfine` 1.19.0 (repeated timings; later runs use 2.0.0, see below), `/usr/bin/time -v`, `/proc/<pid>/status` sampling every 0.2 s (`harness.py`), `samply` 0.13.1 CPU profiles (`hotspots.py`). The scripts are in the repository in `scripts/benchmarks/`. `samply` needs `kernel.perf_event_paranoid` at 1 or lower; the default is 2. |
 | Cache state | Warm page cache unless noted. Caches could not be dropped (needs root). |
 
@@ -194,7 +194,7 @@ On linux, pass 1 (`scan_repository`) is 66.7 s inclusive:
 
 `divan` benchmarks are defined next to the code they measure, in `#[cfg(feature = "bench")] mod benches` blocks in the library, so they can call private functions. `benches/parser.rs` runs them and installs `divan`'s allocation profiler. Inputs are synthetic and checked once before timing. `parse_objects_repo` parses a real repository and is ignored unless `--include-ignored` is passed with `GDP_BENCH_REPO` set.
 
-Baseline (`docs/benchmarks/20261028T211041Z-e6c013a-dirty-baseline.json` in the repository; parser code at `e6c013a`, run 2026-10-28, rustc 1.99.1, divan 0.1.21; `parse_objects_repo` on `~/perfrepos/zed`):
+Baseline (`docs/benchmarks/20261028T211041Z-e6c013a-dirty-baseline.json`, now only in the Git history; parser code at `e6c013a`, run 2026-10-28, rustc 1.99.1, divan 0.1.21; `parse_objects_repo` on the zed clone at `597e5f8304ee`). `docs/benchmarks/20261103T005415Z-eb425b2-baseline` repeats this run on zed `504a7f2`, so its `parse_objects_repo` values are different: 7.21 s, 10,951,847 allocations, 57.3 GB allocated, peak 1.124 GB:
 
 | Benchmark | Median | Throughput | Allocations | Bytes allocated | Reallocations |
 |---|---:|---:|---:|---:|---:|
@@ -222,13 +222,13 @@ How to run:
 
 ```
 python3 scripts/benchmarks/bench.py run --label <name>              # micro benchmarks
-GDP_BENCH_REPO=~/perfrepos/zed RUST_LOG=warn \
+GDP_BENCH_REPO=/path/to/zed RUST_LOG=warn \
   python3 scripts/benchmarks/bench.py run --label <name> -- --include-ignored
 python3 scripts/benchmarks/bench.py compare docs/benchmarks/<old>.json docs/benchmarks/<new>.json
 cargo bench --features bench --bench parser -- <filter>                                  # quick run, no record
 ```
 
-`bench.py run` saves the raw table with the commit, the dirty flag, rustc, the divan version, and the host, plus a parsed JSON file, in `docs/benchmarks/` in the repository. `compare` prints the median time and allocation change for each benchmark.
+`bench.py run` saves the raw table with the commit, the dirty flag, rustc, the divan version, the CPU model, the CPU count, and the kernel, plus a parsed JSON file, in `docs/benchmarks/` in the repository. `compare` prints the median time and allocation change for each benchmark.
 
 ## Findings for step 4.1
 

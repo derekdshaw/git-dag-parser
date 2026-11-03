@@ -23,6 +23,7 @@ use crate::models::container::{HashIndex, ObjectHash};
 use crate::models::{
     Blob, Commit, ObjectContainer, ObjectCopy, ObjectId, ObjectKind, Pack, Tag, Tree,
 };
+use crate::size::format_size;
 
 /// A usable pack: one with both a `.pack` and an `.idx`
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,11 +447,12 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
             .filter(|&pos| open.graph.base(pos).is_some())
             .count();
         info!(
-            "{}: {} deltas, {} requests, simulated delta cache peak {:.2} MB ({} entries), {} left",
+            "{}: {} deltas, {} requests, simulated delta cache peak {} ({} bytes, {} entries), {} left",
             open.file.pack.name,
             deltas,
             sim.requests,
-            sim.peak_bytes as f64 / (1024.0 * 1024.0),
+            format_size(sim.peak_bytes),
+            sim.peak_bytes,
             sim.peak_entries,
             sim.left
         );

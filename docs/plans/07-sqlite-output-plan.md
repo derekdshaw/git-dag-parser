@@ -10,7 +10,7 @@ This step writes the graph to a SQLite database file.
 
 ## Project and status before this step
 
-- Repository: `/home/derekdshaw/r/git-dag-parser` (Rust, binary and library crate).
+- Repository: this repository (Rust, binary and library crate).
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
 - Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 5 (commit rank and owner), 6 (paths, reflogs, liveness).
 - The in-memory model is in `src/models/`. Each container index is in hash order, so the row ids do not change between runs on the same repository.
@@ -18,7 +18,7 @@ This step writes the graph to a SQLite database file.
 
 ## Decision needed before this step
 
-The tree edge tables (`tree_subtrees`, `tree_blobs`) have one row for each tree entry of each tree version. A large test monorepo has approximately 1.2 billion tree entries (an estimate at 50 bytes of tree data for each entry; on linux the real count was 528 million, 34% more than this estimate gave, so plan for about 1.6 billion). With a name blob in each row, these tables can be 30 GB or more, and the write can take a long time.
+The tree edge tables (`tree_subtrees`, `tree_blobs`) have one row for each tree entry of each tree version. A large monorepo can have approximately 1.2 billion tree entries (an estimate at 50 bytes of tree data for each entry; on linux the real count was 528 million, 34% more than this estimate gave, so plan for about 1.6 billion). With a name blob in each row, these tables can be 30 GB or more, and the write can take a long time.
 
 The bloat reports in step 8 do not need these tables. They use `introduced_by_commit_id` and `introduced_at_path_id`. The tables are necessary only for questions such as "which trees contain this blob".
 
@@ -163,7 +163,7 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 
 ## Make sure the result is correct on real repositories
 
-- Run `init` on `engraph` and the large test monorepo. Write the database for the monorepo to the session scratchpad or to a native Linux path, not to `/mnt/d`. Do not write to the monorepo.
+- Run `init` on this repository and on linux (see `docs/benchmarks/README.md`). Write the database for linux to the session scratchpad or to native storage. Do not write to the repository.
 - Record the database size and the write time, with and without `--tree-edges`.
 - Run three example queries in the `sqlite3` tool. Show the results to the user.
 
@@ -183,4 +183,4 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 7 from docs/plans/07-sqlite-output-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In this repository, do step 7 from docs/plans/07-sqlite-output-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.

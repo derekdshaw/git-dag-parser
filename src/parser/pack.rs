@@ -5,11 +5,11 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use flate2::read::ZlibDecoder;
 use flate2::{Decompress, FlushDecompress};
-use hashbrown::HashMap;
 
+use super::delta_cache::{pack_reads, request_times, DeltaCache, DeltaCacheStats, RequestTimes};
 use crate::error::ParseError;
 use crate::models::container::ObjectHash;
-use crate::models::ObjectKind;
+use crate::models::{ObjectCopy, ObjectKind};
 
 /// Object type constants from Git pack format. The four whole-object codes
 /// are mapped by `ObjectKind::from_pack_type`; they are kept here, where the
@@ -27,69 +27,6 @@ const OBJ_REF_DELTA: u8 = 7;
 
 /// Maximum delta chain depth to prevent infinite recursion
 pub(super) const MAX_DELTA_DEPTH: usize = 64;
-
-/// Block size for the delta arena (64 MB per block)
-const ARENA_BLOCK_SIZE: usize = 64 * 1024 * 1024;
-
-/// Arena allocator for delta cache data.
-/// Uses fixed-size blocks that never reallocate. When a block fills up,
-/// a new one is allocated. Dropping frees a handful of large blocks
-/// instead of hundreds of thousands of small Vec<u8>.
-struct DeltaArena {
-    blocks: Vec<Vec<u8>>,
-    block_size: usize,
-}
-
-impl DeltaArena {
-    fn new(block_size: usize) -> Self {
-        Self {
-            blocks: vec![Vec::with_capacity(block_size)],
-            block_size,
-        }
-    }
-
-    /// Store bytes in the arena, return (block_index, offset, len)
-    fn store(&mut self, bytes: &[u8]) -> (u16, u32, u32) {
-        let len = bytes.len();
-
-        // Check if current block has room
-        let needs_new_block = {
-            let current = self.blocks.last().unwrap();
-            current.len() + len > self.block_size
-        };
-
-        if needs_new_block {
-            // For oversized items, allocate a block big enough
-            let cap = self.block_size.max(len);
-            self.blocks.push(Vec::with_capacity(cap));
-        }
-
-        let block_idx = self.blocks.len() - 1;
-        let block = &mut self.blocks[block_idx];
-        let offset = block.len() as u32;
-        block.extend_from_slice(bytes);
-
-        (block_idx as u16, offset, len as u32)
-    }
-
-    /// Get a slice from the arena
-    fn get(&self, block_idx: u16, offset: u32, len: u32) -> &[u8] {
-        &self.blocks[block_idx as usize][offset as usize..(offset as usize + len as usize)]
-    }
-
-    /// Number of entries (blocks) allocated
-    fn block_count(&self) -> usize {
-        self.blocks.len()
-    }
-
-    /// Total bytes stored across all blocks
-    fn total_bytes(&self) -> usize {
-        self.blocks.iter().map(|b| b.len()).sum()
-    }
-}
-
-/// Cache entry: (object_type, block_index, arena_offset, arena_len)
-type DeltaCacheEntry = (u8, u16, u32, u32);
 
 /// Verify the pack file header
 pub fn verify_pack_header(data: &[u8]) -> Result<()> {
@@ -110,59 +47,192 @@ pub fn verify_pack_header(data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Inflates entries of one pack, keeping resolved delta bases in an arena
-/// so a chain is only walked once. Entries read in offset order get the
-/// best reuse, since an OFS delta's base always precedes it.
+/// Inflates the entries of one pack that pass 2 reads, by position. A delta
+/// is applied to its base, which comes from the cache when it is there and
+/// is otherwise built from the pack. A built entry goes into the cache if
+/// it has a request still to come. Only the first build of a delta requests
+/// its base, as `count_requests` counts; a later build, after an eviction,
+/// fetches the base without a request, so the counts stay correct.
 pub struct PackReader<'a> {
     data: &'a [u8],
     index: &'a PackIndex,
-    arena: DeltaArena,
-    cache: HashMap<u64, DeltaCacheEntry>,
+    graph: &'a DeltaGraph,
+    /// The part of `container.copies` for this pack
+    copies: &'a [ObjectCopy],
+    /// Requests still to come for each position
+    requests: Vec<u32>,
+    /// With `times`, the time of each request: see `request_times`
+    time_start: Vec<u32>,
+    times: Vec<u32>,
+    /// True once a position has been built one time
+    built: Vec<bool>,
+    cache: DeltaCache,
+    /// The result of a read that is not cached
+    out: Vec<u8>,
+}
+
+/// The bytes of an entry
+enum Bytes {
+    /// In the cache, at this position
+    Cached(usize),
+    /// Not in the cache
+    Owned(Vec<u8>),
 }
 
 impl<'a> PackReader<'a> {
-    pub fn new(data: &'a [u8], index: &'a PackIndex) -> Self {
+    /// A reader for a pack. `copies` is the part of `container.copies` for
+    /// the pack, so the copy at `copies[i]` is the entry at position `i`,
+    /// and `limit` is the byte limit of the delta cache.
+    pub fn new(
+        data: &'a [u8],
+        index: &'a PackIndex,
+        graph: &'a DeltaGraph,
+        copies: &'a [ObjectCopy],
+        limit: u64,
+    ) -> Self {
+        let RequestTimes {
+            requests,
+            time_start,
+            times,
+        } = request_times(graph, pack_reads(copies));
         Self {
             data,
             index,
-            arena: DeltaArena::new(ARENA_BLOCK_SIZE),
-            cache: HashMap::new(),
+            graph,
+            copies,
+            requests,
+            time_start,
+            times,
+            built: vec![false; copies.len()],
+            cache: DeltaCache::new(limit),
+            out: Vec::new(),
         }
     }
 
-    /// The inflated, delta-resolved content of the entry at `offset`
-    pub fn read(&mut self, offset: u64) -> Result<Vec<u8>> {
-        let offset = offset as usize;
-        let (obj_type, _, header_len) = parse_object_header(&self.data[offset..])?;
-        let data_start = offset + header_len;
-
-        match obj_type {
-            OBJ_OFS_DELTA | OBJ_REF_DELTA => {
-                let (base_offset, payload_start) =
-                    delta_base(self.data, self.index, offset, obj_type, data_start)?;
-                let delta = decompress_data(&self.data[payload_start..])?;
-                // Only bases are cached; the result itself is returned once.
-                let (_, base) = resolve_object_at_offset(
-                    self.data,
-                    self.index,
-                    base_offset as u64,
-                    &mut self.arena,
-                    &mut self.cache,
-                    0,
-                )?;
-                apply_delta(&base, &delta)
+    /// The inflated, delta-resolved content of the entry at position `pos`
+    pub fn read(&mut self, pos: usize) -> Result<&[u8]> {
+        Ok(match self.request(pos, 0)? {
+            Bytes::Cached(p) => self.cache.get(p as u32).unwrap(),
+            Bytes::Owned(bytes) => {
+                self.out = bytes;
+                &self.out
             }
-            _ => decompress_data(&self.data[data_start..]),
+        })
+    }
+
+    /// Counts kept by the delta cache, with `left` set to the entries in it
+    pub fn stats(&self) -> DeltaCacheStats {
+        self.cache.stats
+    }
+
+    /// One request for the entry at `c`. The steps are in the same order as
+    /// in `simulate_cache`, so that with no eviction the cache peaks are
+    /// equal to the simulated peaks.
+    fn request(&mut self, c: usize, depth: usize) -> Result<Bytes> {
+        if self.cache.get(c as u32).is_some() {
+            self.cache.stats.hits += 1;
+            debug_assert!(self.requests[c] > 0, "count_requests counted too few");
+            self.requests[c] -= 1;
+            if self.requests[c] == 0 {
+                // The last request: the entry leaves the cache without a copy
+                return Ok(Bytes::Owned(self.cache.take(c as u32).unwrap()));
+            }
+            self.cache.set_next(c as u32, self.next(c));
+            return Ok(Bytes::Cached(c));
+        }
+        let first = !self.built[c];
+        if !first {
+            // Evicted, bypassed or too large: built again
+            self.cache.stats.misses += 1;
+        }
+        let bytes = self.build(c, first, depth)?;
+        self.built[c] = true;
+        debug_assert!(self.requests[c] > 0, "count_requests counted too few");
+        self.requests[c] -= 1;
+        Ok(self.keep(c, bytes))
+    }
+
+    /// The bytes of `c` for a second build of a delta on it. Not a counted
+    /// request: only the first build of a delta requests its base.
+    fn fetch(&mut self, c: usize, depth: usize) -> Result<Bytes> {
+        if self.cache.get(c as u32).is_some() {
+            self.cache.stats.hits += 1;
+            return Ok(Bytes::Cached(c));
+        }
+        self.cache.stats.misses += 1;
+        let bytes = self.build(c, false, depth)?;
+        Ok(self.keep(c, bytes))
+    }
+
+    /// Cache the bytes of `c` if it has a request still to come
+    fn keep(&mut self, c: usize, bytes: Vec<u8>) -> Bytes {
+        if self.requests[c] > 0 {
+            match self.cache.insert(c as u32, bytes, self.next(c)) {
+                Ok(()) => Bytes::Cached(c),
+                Err(bytes) => Bytes::Owned(bytes),
+            }
+        } else {
+            Bytes::Owned(bytes)
         }
     }
 
-    /// (cached bases, arena blocks, arena bytes)
-    pub fn cache_stats(&self) -> (usize, usize, usize) {
-        (
-            self.cache.len(),
-            self.arena.block_count(),
-            self.arena.total_bytes(),
-        )
+    /// Time of the next request of `c`. Only when `requests[c] > 0`.
+    fn next(&self, c: usize) -> u32 {
+        self.times[(self.time_start[c + 1] - self.requests[c]) as usize]
+    }
+
+    /// Inflate the entry at `c` and, for a delta, apply it to its base. The
+    /// base is requested for a first build and fetched for a later one.
+    fn build(&mut self, c: usize, first: bool, depth: usize) -> Result<Vec<u8>> {
+        if depth > MAX_DELTA_DEPTH {
+            return Err(anyhow!(
+                "Delta chain too deep (>{}) at offset {}",
+                MAX_DELTA_DEPTH,
+                self.offset(c)
+            ));
+        }
+        match self.graph.base(c) {
+            None => decompress_data(&self.data[self.body_start(c)?..]),
+            Some(b) => {
+                let delta = decompress_data(&self.data[self.delta_start(c)?..])?;
+                let base = if first {
+                    self.request(b, depth + 1)?
+                } else {
+                    self.fetch(b, depth + 1)?
+                };
+                // Used before the next insert, which could evict it
+                let base: &[u8] = match &base {
+                    Bytes::Cached(p) => self.cache.get(*p as u32).unwrap(),
+                    Bytes::Owned(bytes) => bytes,
+                };
+                apply_delta(base, &delta)
+            }
+        }
+    }
+
+    fn offset(&self, pos: usize) -> usize {
+        self.copies[pos].offset().expect("pack copy has an offset") as usize
+    }
+
+    /// Start of the zlib stream of a whole entry
+    fn body_start(&self, pos: usize) -> Result<usize> {
+        let offset = self.offset(pos);
+        let (_, _, header_len) = parse_object_header(&self.data[offset..])?;
+        Ok(offset + header_len)
+    }
+
+    /// Start of the zlib stream of a delta entry, after its base reference
+    fn delta_start(&self, pos: usize) -> Result<usize> {
+        let offset = self.offset(pos);
+        let (obj_type, _, header_len) = parse_object_header(&self.data[offset..])?;
+        let (base_offset, payload_start) =
+            delta_base(self.data, self.index, offset, obj_type, offset + header_len)?;
+        debug_assert_eq!(
+            base_offset,
+            self.offset(self.graph.base(pos).unwrap()),
+            "the graph and the entry agree on the base"
+        );
+        Ok(payload_start)
     }
 }
 
@@ -383,83 +453,6 @@ fn decompress_data(data: &[u8]) -> Result<Vec<u8>> {
     decoder
         .read_to_end(&mut result)
         .map_err(|e| ParseError::DecompressionError(e.to_string()))?;
-    Ok(result)
-}
-
-/// Resolve an object at a specific offset (for delta resolution)
-fn resolve_object_at_offset(
-    pack_data: &[u8],
-    index: &PackIndex,
-    offset: u64,
-    delta_arena: &mut DeltaArena,
-    delta_cache: &mut HashMap<u64, DeltaCacheEntry>,
-    depth: usize,
-) -> Result<(u8, Vec<u8>)> {
-    if depth > MAX_DELTA_DEPTH {
-        return Err(anyhow!(
-            "Delta chain too deep (>{}) at offset {}",
-            MAX_DELTA_DEPTH,
-            offset
-        ));
-    }
-
-    // Check cache first - copy data out of arena
-    if let Some(&(obj_type, blk, off, len)) = delta_cache.get(&offset) {
-        let data = delta_arena.get(blk, off, len).to_vec();
-        return Ok((obj_type, data));
-    }
-
-    let offset_usize = offset as usize;
-    let (obj_type, _obj_size, header_len) = parse_object_header(&pack_data[offset_usize..])?;
-
-    let data_start = offset_usize + header_len;
-
-    let result = match obj_type {
-        OBJ_OFS_DELTA => {
-            let (base_offset_relative, delta_header_len) =
-                parse_ofs_delta_header(&pack_data[data_start..])?;
-            let abs_base_offset = offset_usize - base_offset_relative;
-            let delta_data = decompress_data(&pack_data[data_start + delta_header_len..])?;
-            let base_data = resolve_object_at_offset(
-                pack_data,
-                index,
-                abs_base_offset as u64,
-                delta_arena,
-                delta_cache,
-                depth + 1,
-            )?;
-            let resolved = apply_delta(&base_data.1, &delta_data)?;
-            (base_data.0, resolved)
-        }
-        OBJ_REF_DELTA => {
-            let base_hash: ObjectHash = pack_data[data_start..data_start + 20].try_into()?;
-            let delta_data = decompress_data(&pack_data[data_start + 20..])?;
-
-            let base_offset = index
-                .offset_of(&base_hash)
-                .ok_or_else(|| ParseError::ObjectNotFound(hex::encode(base_hash)))?;
-
-            let base_data = resolve_object_at_offset(
-                pack_data,
-                index,
-                base_offset,
-                delta_arena,
-                delta_cache,
-                depth + 1,
-            )?;
-            let resolved = apply_delta(&base_data.1, &delta_data)?;
-            (base_data.0, resolved)
-        }
-        _ => {
-            let obj_data = decompress_data(&pack_data[data_start..])?;
-            (obj_type, obj_data)
-        }
-    };
-
-    // Cache the resolved object in the arena
-    let (blk, off, len) = delta_arena.store(&result.1);
-    delta_cache.insert(offset, (result.0, blk, off, len));
-
     Ok(result)
 }
 
@@ -691,6 +684,7 @@ mod benches {
     use flate2::{Compression, Decompress};
 
     use crate::parser::content::benches::synthetic_tree;
+    use crate::parser::delta_cache::DeltaCache;
 
     /// Bytes of one entry in `synthetic_tree`
     const ENTRY_BYTES: usize = 42;
@@ -806,6 +800,17 @@ mod benches {
             .counter(BytesCount::of_slice(&result))
             .bench_local(|| super::apply_delta(black_box(&base), black_box(&delta)).unwrap());
     }
+
+    /// Pass 2 gets a cached base for each delta built on it. A hit must
+    /// make 0 allocations.
+    #[divan::bench]
+    fn delta_cache_hit(bencher: Bencher) {
+        let mut cache = DeltaCache::new(1 << 30);
+        cache
+            .insert(0, synthetic_tree(64 * 1024 / ENTRY_BYTES), 1)
+            .unwrap();
+        bencher.bench_local(|| black_box(cache.get(black_box(0)).unwrap().len()));
+    }
 }
 
 #[cfg(test)]
@@ -816,7 +821,7 @@ mod tests {
     use flate2::Compression;
 
     use super::*;
-    use crate::models::ObjectKind;
+    use crate::models::{ObjectId, ObjectKind};
 
     fn zlib(data: &[u8]) -> Vec<u8> {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -879,6 +884,32 @@ mod tests {
         delta
     }
 
+    /// A delta whose result is the base without its first `suffix.len()`
+    /// bytes, followed by `suffix`: the same length as the base, and
+    /// different for each base, so a wrong base gives a wrong result
+    fn shift_delta(base_size: u64, suffix: &[u8]) -> Vec<u8> {
+        let shift = suffix.len() as u64;
+        assert!(shift > 0 && shift < 256 && base_size > shift && base_size < 0x10000);
+        let mut delta = varint(base_size);
+        delta.extend(varint(base_size));
+        // Copy: one offset byte, two size bytes
+        let size = base_size - shift;
+        delta.push(0x80 | 0x01 | 0x10 | 0x20);
+        delta.push(shift as u8);
+        delta.push(size as u8);
+        delta.push((size >> 8) as u8);
+        for chunk in suffix.chunks(127) {
+            delta.push(chunk.len() as u8);
+            delta.extend_from_slice(chunk);
+        }
+        delta
+    }
+
+    /// The result of `shift_delta(base.len(), suffix)` applied to `base`
+    fn shifted(base: &[u8], suffix: &[u8]) -> Vec<u8> {
+        [&base[suffix.len()..], suffix].concat()
+    }
+
     /// Writes a version 2 pack and its index in memory
     struct PackBuilder {
         data: Vec<u8>,
@@ -926,6 +957,39 @@ mod tests {
             let offset = self.data.len() as u64;
             let mut bytes = obj_header(OBJ_OFS_DELTA, delta.len() as u64);
             bytes.extend(ofs_encode(offset - base_offset));
+            bytes.extend(zlib(&delta));
+            self.push(hash, &bytes)
+        }
+
+        /// An OFS delta on the entry at `base_offset`, whose body is
+        /// `base`, with the result `shifted(base, suffix)`
+        fn add_ofs_shift(
+            &mut self,
+            hash: ObjectHash,
+            base_offset: u64,
+            base: &[u8],
+            suffix: &[u8],
+        ) -> u64 {
+            let delta = shift_delta(base.len() as u64, suffix);
+            let offset = self.data.len() as u64;
+            let mut bytes = obj_header(OBJ_OFS_DELTA, delta.len() as u64);
+            bytes.extend(ofs_encode(offset - base_offset));
+            bytes.extend(zlib(&delta));
+            self.push(hash, &bytes)
+        }
+
+        /// A REF delta on the entry with hash `base_hash`, whose body is
+        /// `base`, with the result `shifted(base, suffix)`
+        fn add_ref_shift(
+            &mut self,
+            hash: ObjectHash,
+            base_hash: ObjectHash,
+            base: &[u8],
+            suffix: &[u8],
+        ) -> u64 {
+            let delta = shift_delta(base.len() as u64, suffix);
+            let mut bytes = obj_header(OBJ_REF_DELTA, delta.len() as u64);
+            bytes.extend_from_slice(&base_hash);
             bytes.extend(zlib(&delta));
             self.push(hash, &bytes)
         }
@@ -1053,15 +1117,295 @@ mod tests {
         let o_d2 = pack.add_ofs_delta([3; 20], o_d1, b"second, on the first");
         let o_ref = pack.add_ref_delta([4; 20], [1; 20], b"ref delta result");
         let (data, index) = pack.finish();
+        let (entries, graph) = scan_pack(&data, &index).unwrap();
+        let copies: Vec<ObjectCopy> = entries
+            .iter()
+            .enumerate()
+            .map(|(pos, e)| {
+                let mut copy = ObjectCopy::packed(
+                    ObjectId::new(e.kind, pos),
+                    0,
+                    e.offset,
+                    e.size_disk,
+                    e.is_delta,
+                );
+                copy.is_primary = true;
+                copy
+            })
+            .collect();
+        let position = |offset| entries.iter().position(|e| e.offset == offset).unwrap();
 
-        let mut reader = PackReader::new(&data, &index);
+        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
 
-        assert_eq!(reader.read(o_base).unwrap(), b"base tree");
-        assert_eq!(reader.read(o_d1).unwrap(), b"first delta result");
-        assert_eq!(reader.read(o_d2).unwrap(), b"second, on the first");
-        assert_eq!(reader.read(o_ref).unwrap(), b"ref delta result");
-        // Only bases are cached: the base tree and the first delta
-        assert_eq!(reader.cache_stats().0, 2);
+        assert_eq!(reader.read(position(o_base)).unwrap(), b"base tree");
+        assert_eq!(reader.read(position(o_d1)).unwrap(), b"first delta result");
+        assert_eq!(
+            reader.read(position(o_d2)).unwrap(),
+            b"second, on the first"
+        );
+        assert_eq!(reader.read(position(o_ref)).unwrap(), b"ref delta result");
+        // Every base was cached when needed, and none is left after its
+        // last request
+        let stats = reader.stats();
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.evictions, 0);
+        assert_eq!(stats.left, 0);
+    }
+
+    /// What a `PackReader` needs besides the pack: the graph from pass 1
+    /// and the pack's copies, all trees, with `primary[pos]` saying which
+    /// pass 2 reads
+    fn reader_inputs(
+        data: &[u8],
+        index: &PackIndex,
+        primary: &[bool],
+    ) -> (DeltaGraph, Vec<ObjectCopy>) {
+        let (entries, graph) = scan_pack(data, index).unwrap();
+        assert_eq!(entries.len(), primary.len());
+        let copies = entries
+            .iter()
+            .zip(primary)
+            .enumerate()
+            .map(|(pos, (e, &is_primary))| {
+                let mut copy = ObjectCopy::packed(
+                    ObjectId::new(e.kind, pos),
+                    0,
+                    e.offset,
+                    e.size_disk,
+                    e.is_delta,
+                );
+                copy.is_primary = is_primary;
+                copy
+            })
+            .collect();
+        (graph, copies)
+    }
+
+    /// Length of every body in the reader tests, so that a cache limit of
+    /// `TREE_LEN` holds exactly one entry
+    const TREE_LEN: usize = 64;
+
+    fn tree(n: u8) -> Vec<u8> {
+        let mut body = format!("tree {n} ").into_bytes();
+        body.resize(TREE_LEN, b'.');
+        body
+    }
+
+    #[test]
+    fn pack_reader_evicts_the_base_requested_farthest_away_and_rebuilds_it() {
+        // Positions: A whole (not read); B on A; C on B; D on C; E on A.
+        // Reads B, C, D, E at times 0..4. A is requested at times 0 and 3,
+        // B at 0 and 1, C at 1 and 2.
+        let a = tree(0);
+        let b = shifted(&a, b"+b");
+        let c = shifted(&b, b"+c");
+        let d = shifted(&c, b"+d");
+        let e = shifted(&a, b"+e");
+        let mut pack = PackBuilder::new();
+        let o_a = pack.add([1; 20], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
+        let o_c = pack.add_ofs_shift([3; 20], o_b, &b, b"+c");
+        pack.add_ofs_shift([4; 20], o_c, &c, b"+d");
+        pack.add_ofs_shift([5; 20], o_a, &a, b"+e");
+        let (data, index) = pack.finish();
+        let (graph, copies) = reader_inputs(&data, &index, &[false, true, true, true, true]);
+
+        // Room for one entry
+        let mut reader = PackReader::new(&data, &index, &graph, &copies, TREE_LEN as u64);
+
+        // Building B caches A (next 3), then B (next 1) evicts A
+        assert_eq!(reader.read(1).unwrap(), b);
+        assert_eq!(reader.stats().evictions, 1);
+        // C takes B on its last request; D takes C
+        assert_eq!(reader.read(2).unwrap(), c);
+        assert_eq!(reader.read(3).unwrap(), d);
+        assert_eq!(reader.stats().misses, 0);
+        // E needs A again: built a second time
+        assert_eq!(reader.read(4).unwrap(), e);
+
+        let stats = reader.stats();
+        assert_eq!(stats.hits, 2, "B for C, C for D");
+        assert_eq!(stats.misses, 1, "A for E");
+        assert_eq!(stats.evictions, 1);
+        assert_eq!(stats.bypassed, 0);
+        assert_eq!(stats.too_large, 0);
+        assert_eq!(stats.peak_entries, 1);
+        assert_eq!(stats.left, 0);
+    }
+
+    #[test]
+    fn pack_reader_fetches_the_base_of_a_second_build_without_a_request() {
+        // Positions: A whole (not read); B on A; D on A; C on B.
+        // Reads B, D, C at times 0..3. A is requested at 0 and 1, B at 0
+        // and 2. B is bypassed at time 0 because A (next 1) is needed
+        // sooner, so building C rebuilds B, which fetches A.
+        let a = tree(0);
+        let b = shifted(&a, b"+b");
+        let c = shifted(&b, b"+c");
+        let d = shifted(&a, b"+d");
+        let mut pack = PackBuilder::new();
+        let o_a = pack.add([1; 20], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
+        pack.add_ofs_shift([3; 20], o_a, &a, b"+d");
+        pack.add_ofs_shift([4; 20], o_b, &b, b"+c");
+        let (data, index) = pack.finish();
+        let (graph, copies) = reader_inputs(&data, &index, &[false, true, true, true]);
+
+        let mut reader = PackReader::new(&data, &index, &graph, &copies, TREE_LEN as u64);
+
+        assert_eq!(reader.read(1).unwrap(), b);
+        assert_eq!(reader.stats().bypassed, 1, "B, requested later than A");
+        assert_eq!(reader.read(2).unwrap(), d);
+        assert_eq!(reader.stats().hits, 1, "A for D, its last request");
+        assert_eq!(reader.read(3).unwrap(), c);
+
+        let stats = reader.stats();
+        assert_eq!(stats.misses, 2, "B for C, then A for the rebuild of B");
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.evictions, 0);
+        assert_eq!(stats.left, 0);
+    }
+
+    #[test]
+    fn pack_reader_works_with_a_cache_too_small_for_any_entry() {
+        let a = tree(0);
+        let b = shifted(&a, b"+b");
+        let c = shifted(&b, b"+c");
+        let mut pack = PackBuilder::new();
+        let o_a = pack.add([1; 20], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
+        pack.add_ofs_shift([3; 20], o_b, &b, b"+c");
+        let (data, index) = pack.finish();
+        let (graph, copies) = reader_inputs(&data, &index, &[true, true, true]);
+
+        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1);
+
+        assert_eq!(reader.read(0).unwrap(), a);
+        assert_eq!(reader.read(1).unwrap(), b);
+        assert_eq!(reader.read(2).unwrap(), c);
+
+        let stats = reader.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.too_large, 2, "A after its read, B after its read");
+        assert_eq!(stats.misses, 3, "A for B; B for C, and A for that rebuild");
+        assert_eq!(stats.peak_entries, 0);
+        assert_eq!(stats.left, 0);
+    }
+
+    #[test]
+    fn pack_reader_serves_a_read_from_the_cache_without_a_copy() {
+        // A is read and then needed by B: after the read it stays cached
+        let a = tree(0);
+        let b = shifted(&a, b"+b");
+        let mut pack = PackBuilder::new();
+        let o_a = pack.add([1; 20], OBJ_TREE, &a);
+        pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
+        let (data, index) = pack.finish();
+        let (graph, copies) = reader_inputs(&data, &index, &[true, true]);
+
+        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
+
+        assert_eq!(reader.read(0).unwrap(), a);
+        assert_eq!(reader.stats().left, 1, "A waits for B");
+        assert_eq!(reader.stats().peak_bytes, TREE_LEN as u64);
+        assert_eq!(reader.read(1).unwrap(), b);
+        assert_eq!(reader.stats().left, 0);
+        assert_eq!(reader.stats().hits, 1);
+    }
+
+    #[test]
+    fn pack_reader_rejects_a_delta_chain_that_is_too_deep() {
+        let mut pack = PackBuilder::new();
+        let mut offset = pack.add([0; 20], OBJ_TREE, b"root");
+        let depth = MAX_DELTA_DEPTH + 1;
+        for i in 1..=depth {
+            let mut hash = [0u8; 20];
+            hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            offset = pack.add_ofs_delta(hash, offset, b"next");
+        }
+        let (data, index) = pack.finish();
+        let primary = vec![true; depth + 1];
+        let (graph, copies) = reader_inputs(&data, &index, &primary);
+
+        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
+
+        let err = reader.read(depth).unwrap_err().to_string();
+        assert!(err.contains("too deep"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn pack_reader_resolves_a_ref_delta_on_a_later_base() {
+        // Position 0: R, a REF delta on A; position 1: A, a whole tree.
+        // Reads R, A at times 0, 1. A is requested at 0 (the build of R)
+        // and 1 (its read), so it is cached between them.
+        let a = tree(0);
+        let r = shifted(&a, b"+r");
+        let mut pack = PackBuilder::new();
+        pack.add_ref_shift([2; 20], [1; 20], &a, b"+r");
+        pack.add([1; 20], OBJ_TREE, &a);
+        let (data, index) = pack.finish();
+        let (graph, copies) = reader_inputs(&data, &index, &[true, true]);
+        assert_eq!(graph.base(0), Some(1), "the base comes after the delta");
+
+        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
+
+        assert_eq!(reader.read(0).unwrap(), r);
+        assert_eq!(reader.stats().left, 1, "A waits for its read");
+        assert_eq!(reader.read(1).unwrap(), a);
+
+        let stats = reader.stats();
+        assert_eq!(stats.hits, 1, "A for its read");
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.left, 0);
+    }
+
+    #[test]
+    fn pack_reader_peaks_equal_the_simulation_when_nothing_is_evicted() {
+        // Shared bases, chains, a forward REF delta, entries of several
+        // sizes, and entries that are not read
+        let a = tree(0);
+        let b = shifted(&a, b"+b");
+        let c = shifted(&b, b"+c");
+        let mut pack = PackBuilder::new();
+        let o_a = pack.add([1; 20], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
+        pack.add_ofs_delta([3; 20], o_a, b"small, on a");
+        let o_c = pack.add_ofs_shift([4; 20], o_b, &b, b"+c");
+        pack.add_ref_delta([5; 20], [8; 20], b"ref delta on the later e");
+        pack.add_ofs_delta([6; 20], o_c, &[b'x'; 300]);
+        pack.add_ofs_delta([7; 20], o_b, b"another on b");
+        pack.add([8; 20], OBJ_TREE, b"e, a whole tree that comes late");
+        pack.add_ofs_delta([9; 20], o_a, &[b'y'; 200]);
+        let (data, index) = pack.finish();
+        let primary = [true, false, true, true, true, true, false, true, true];
+        let (graph, copies) = reader_inputs(&data, &index, &primary);
+        let (entries, _) = scan_pack(&data, &index).unwrap();
+
+        let sim = crate::parser::delta_cache::simulate_cache(
+            &graph,
+            crate::parser::delta_cache::pack_reads(&copies),
+            |pos| entries[pos].size,
+        )
+        .unwrap();
+        assert!(sim.peak_entries > 1, "the fixture exercises the cache");
+
+        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
+        for pos in crate::parser::delta_cache::pack_reads(&copies) {
+            let body = reader.read(pos).unwrap();
+            if pos == 3 {
+                assert_eq!(body, c, "a delta on a delta that was not read");
+            }
+        }
+
+        let stats = reader.stats();
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.evictions, 0);
+        assert_eq!(stats.bypassed, 0);
+        assert_eq!(stats.too_large, 0);
+        assert_eq!(stats.peak_bytes, sim.peak_bytes);
+        assert_eq!(stats.peak_entries, sim.peak_entries);
+        assert_eq!(stats.left, sim.left);
+        assert_eq!(stats.left, 0);
     }
 
     #[test]

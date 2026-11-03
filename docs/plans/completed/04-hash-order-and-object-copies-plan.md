@@ -16,7 +16,7 @@ This step also divides the read into two passes. Pass 1 reads only headers and g
 
 ## Project and status before this step
 
-- Repository: `/home/derekdshaw/r/git-dag-parser` (Rust, binary and library crate).
+- Repository: this repository (Rust, binary and library crate).
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
 - Completed steps:
   - Step 1 (`151e24b`): library target, git fixture builder, and git oracle tests in `tests/`.
@@ -103,10 +103,10 @@ Use positive tests. Do not write many negative tests.
 
 Use a small program in the session scratchpad. Do not add it to the project.
 
-- Run it on these repositories in `/home/derekdshaw/r`: `engraph`, `agent-work-visualizer`, `mnemosyne`, `home-auction`, `git-dag-parser`.
+- Run it on this repository and on other small repositories.
 - Compare each copy with `git verify-pack -v` and the loose files.
 - Compare each object `size_disk` with `git cat-file --batch-all-objects --batch-check='%(objectname) %(objectsize:disk)'`.
-- Before this step, `engraph` had 12 objects with a different `size_disk`. All were duplicates. Report the new count of differences.
+- Before this step, one of the repositories had 12 objects with a different `size_disk`. All were duplicates. Report the new count of differences.
 
 ## Next step
 
@@ -126,7 +126,3 @@ Step 4.1 (memory and I/O at scale): compact tree entries, a name store, a delta 
 - Do not put a "Co-Authored-By" line or other tagline in the commit message.
 - Put unit tests in the source file. Put tests that use real git repositories in `tests/`.
 - At the end, tell the user what this step does and what the next step is.
-
-## Prompt to start this step
-
-> In /home/derekdshaw/r/git-dag-parser, do step 4 from docs/plans/completed/04-hash-order-and-object-copies-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.

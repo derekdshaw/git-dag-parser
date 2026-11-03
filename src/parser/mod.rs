@@ -26,6 +26,27 @@ pub type ParsedObjects = (
     ObjectContainer,
 );
 
+/// Options of a parse
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseOptions {
+    /// Byte limit of the delta cache of pass 2. 0 caches nothing.
+    pub delta_cache_limit: u64,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            delta_cache_limit: 1 << 30,
+        }
+    }
+}
+
+/// Parse all Git objects from a repository's object store with the default
+/// options
+pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
+    parse_objects_with(git_dir, &ParseOptions::default())
+}
+
 /// Parse all Git objects from a repository's object store
 ///
 /// Two passes over the object store:
@@ -42,13 +63,13 @@ pub type ParsedObjects = (
 /// - Hash index (for resolving hashes to indices)
 /// - Object container, with commit trees and parents, tag targets and refs
 ///   resolved to indices
-pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
+pub fn parse_objects_with(git_dir: &Path, options: &ParseOptions) -> Result<ParsedObjects> {
     let mut scanned = scan::scan_repository(git_dir)?;
     let bodies::Bodies {
         commits_raw,
         tree_entries,
         names,
-    } = bodies::read_bodies(&mut scanned)?;
+    } = bodies::read_bodies(&mut scanned, options.delta_cache_limit)?;
     // Packs are closed here; everything needed is in memory.
     let scan::Scan {
         mut container,
@@ -111,7 +132,9 @@ mod benches {
     /// A full parse of a real repository. Ignored by default because it
     /// needs a repository and takes seconds per run:
     ///
-    /// `GDP_BENCH_REPO=~/perfrepos/zed cargo bench --features bench --bench parser -- --include-ignored parse_objects_repo`
+    /// `GDP_BENCH_REPO=/path/to/zed.git cargo bench --features bench --bench parser -- --include-ignored parse_objects_repo`
+    ///
+    /// `docs/benchmarks/README.md` gives the zed commit to use.
     #[divan::bench(ignore, sample_count = 3, sample_size = 1)]
     fn parse_objects_repo() -> super::ParsedObjects {
         let repo =

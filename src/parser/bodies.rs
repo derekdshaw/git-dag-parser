@@ -3,7 +3,7 @@
 //!
 //! Copies are visited in the order pass 1 recorded them, which is pack by
 //! pack and offset-ascending within each pack, so every pack is read
-//! sequentially and delta bases are almost always already cached.
+//! sequentially.
 
 use std::time::Instant;
 
@@ -19,6 +19,7 @@ use super::scan::Scanned;
 use crate::error::ParseError;
 use crate::models::container::{CommitRaw, ObjectHash, TreeEntries, TreeEntriesBuilder};
 use crate::models::{NameStore, ObjectId, ObjectKind};
+use crate::size::format_size;
 
 /// Commit headers, tree entries, and the names the entries refer to
 pub struct Bodies {
@@ -31,7 +32,9 @@ pub struct Bodies {
 
 /// Read every commit, tree and tag body and fill in what pass 1 could not
 /// know: commit headers, tree entries, and tag names and targets.
-pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
+/// `delta_cache_limit` is the byte limit of the delta cache; one pack is
+/// read at a time, so each pack's reader gets the whole limit.
+pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodies> {
     let start = Instant::now();
     let Scanned {
         scan,
@@ -65,23 +68,35 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
         }
 
         let hash = scan.container.hash_of(id);
-        let body = match copy.pack() {
+        let loose_body;
+        let body: &[u8] = match copy.pack() {
             Some(pack_idx) => {
+                let open = &packs[pack_idx];
                 if reader.as_ref().is_none_or(|(p, _)| *p != pack_idx) {
                     if let Some((p, r)) = &reader {
                         log_cache(&packs[*p].file.pack.name, r);
                     }
-                    let open = &packs[pack_idx];
-                    reader = Some((pack_idx, PackReader::new(&open.data, &open.index)));
+                    let copies = &scan.container.copies
+                        [open.first_copy..open.first_copy + open.index.entries.len()];
+                    reader = Some((
+                        pack_idx,
+                        PackReader::new(
+                            &open.data,
+                            &open.index,
+                            &open.graph,
+                            copies,
+                            delta_cache_limit,
+                        ),
+                    ));
                 }
                 let (_, r) = reader.as_mut().unwrap();
                 let offset = copy.offset().unwrap_or(0);
-                r.read(offset).with_context(|| {
+                r.read(pos - open.first_copy).with_context(|| {
                     format!(
                         "Failed to inflate {} at offset {} of {}",
                         hex(&hash),
                         offset,
-                        packs[pack_idx].file.pack.name
+                        open.file.pack.name
                     )
                 })?
             }
@@ -98,22 +113,23 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
                     ))
                     .into());
                 }
-                body
+                loose_body = body;
+                &loose_body
             }
         };
 
         match id {
             ObjectId::Commit(i) => {
                 let raw =
-                    parse_commit(&body, i).with_context(|| format!("Bad commit {}", hex(&hash)))?;
+                    parse_commit(body, i).with_context(|| format!("Bad commit {}", hex(&hash)))?;
                 commits_raw.insert(hash, raw);
             }
             ObjectId::Tree(i) => {
-                parse_tree(&body, i, &mut names, &scan.index, &mut trees)
+                parse_tree(body, i, &mut names, &scan.index, &mut trees)
                     .with_context(|| format!("Bad tree {}", hex(&hash)))?;
             }
             ObjectId::Tag(i) => {
-                let raw = parse_tag(&body).with_context(|| format!("Bad tag {}", hex(&hash)))?;
+                let raw = parse_tag(body).with_context(|| format!("Bad tag {}", hex(&hash)))?;
                 let tag = &mut scan.container.tags[i];
                 tag.name = raw.name;
                 tag.target_hash = raw.target;
@@ -145,14 +161,22 @@ pub fn read_bodies(scanned: &mut Scanned) -> Result<Bodies> {
 }
 
 fn log_cache(pack_name: &str, reader: &PackReader) {
-    let (cached, blocks, bytes) = reader.cache_stats();
+    let s = reader.stats();
     info!(
-        "{}: {} delta bases cached in {} blocks ({:.2} MB)",
+        "{}: delta cache {} hits, {} misses, {} evictions, {} too large, {} bypassed, peak {} ({} bytes, {} entries), {} left",
         pack_name,
-        cached,
-        blocks,
-        bytes as f64 / (1024.0 * 1024.0)
+        s.hits,
+        s.misses,
+        s.evictions,
+        s.too_large,
+        s.bypassed,
+        format_size(s.peak_bytes),
+        s.peak_bytes,
+        s.peak_entries,
+        s.left
     );
+    // Each entry is dropped at its last request
+    debug_assert_eq!(s.left, 0, "{pack_name}: delta cache entries left");
 }
 
 /// `objects/xx/yyyy...` for a hash
