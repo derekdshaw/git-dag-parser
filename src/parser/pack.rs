@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use flate2::read::ZlibDecoder;
-use flate2::{Decompress, FlushDecompress};
+use flate2::{Decompress, FlushDecompress, Status};
 
 use super::delta_cache::{pack_reads, request_times, DeltaCache, DeltaCacheStats, RequestTimes};
 use crate::error::ParseError;
@@ -461,7 +461,26 @@ fn decompress_data(data: &[u8]) -> Result<Vec<u8>> {
 /// must end and give exactly `size` bytes. `data` can go on after the
 /// stream, as in a pack, where the next entry follows.
 fn inflate(inflater: &mut Decompress, data: &[u8], size: usize) -> Result<Vec<u8>> {
-    todo!("{:p} {} {}", inflater, data.len(), size)
+    inflater.reset(true);
+    let mut out = Vec::with_capacity(size);
+    // Writes only into the spare capacity, so `out` is never reallocated
+    let status = inflater
+        .decompress_vec(data, &mut out, FlushDecompress::Finish)
+        .map_err(|e| ParseError::DecompressionError(e.to_string()))?;
+    if status != Status::StreamEnd {
+        return Err(ParseError::DecompressionError(format!(
+            "zlib stream did not end within the expected {size} bytes"
+        ))
+        .into());
+    }
+    if out.len() != size {
+        return Err(ParseError::DecompressionError(format!(
+            "zlib stream gave {} bytes, expected {size}",
+            out.len()
+        ))
+        .into());
+    }
+    Ok(out)
 }
 
 /// Apply a delta to a base object
@@ -792,10 +811,17 @@ mod benches {
     fn decompress_data(bencher: Bencher, bytes: usize) {
         let body = synthetic_tree(bytes / ENTRY_BYTES);
         let compressed = zlib(&body);
-        assert_eq!(super::decompress_data(&compressed).unwrap(), body);
+        // One decoder for all objects, as each `PackReader` uses it
+        let mut inflater = Decompress::new(true);
+        assert_eq!(
+            super::inflate(&mut inflater, &compressed, body.len()).unwrap(),
+            body
+        );
         bencher
             .counter(BytesCount::of_slice(&body))
-            .bench_local(|| super::decompress_data(black_box(&compressed)).unwrap());
+            .bench_local(|| {
+                super::inflate(&mut inflater, black_box(&compressed), body.len()).unwrap()
+            });
     }
 
     /// Pass 2 rebuilds every deltified tree from its base
@@ -1530,7 +1556,9 @@ mod tests {
 
     /// Bytes that do not compress to a few bytes
     fn sample(len: usize, seed: u8) -> Vec<u8> {
-        (0..len).map(|i| (i * 31 + seed as usize) as u8 ^ (i >> 7) as u8).collect()
+        (0..len)
+            .map(|i| (i * 31 + seed as usize) as u8 ^ (i >> 7) as u8)
+            .collect()
     }
 
     #[test]
