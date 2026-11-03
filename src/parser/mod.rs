@@ -144,6 +144,13 @@ mod benches {
     /// `GDP_BENCH_REPO=/path/to/zed.git cargo bench --features bench --bench parser -- --include-ignored parse_objects_repo`
     ///
     /// `docs/benchmarks/README.md` gives the zed commit to use.
+    ///
+    /// Do not use its allocation counts for the memory of a parse. divan
+    /// counts only the allocations of the thread that runs the benchmark,
+    /// and pass 2 allocates most of its memory on the worker threads. Thus
+    /// the counts and the peak are too low; use the harness for the peak
+    /// heap. The time is correct. The benchmark runs on rayon's default
+    /// pool (all hardware threads), not the thread count of the binary.
     #[divan::bench(ignore, sample_count = 3, sample_size = 1)]
     fn parse_objects_repo() -> super::ParsedObjects {
         let repo =

@@ -7,26 +7,30 @@ The parser reads the Git object store directly. It does not start `git` processe
 1. Pass 1 reads only the object headers. It finds all objects, their types, their sizes, and all copies of each object on disk.
 2. Pass 2 reads the bodies of commits, trees, and tags. It does not read blob bodies.
 
-After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. The parser uses one thread.
+After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. Pass 2 uses more than one thread. The other steps use one thread.
+
+For the meaning of terms such as work unit, worker, and delta family, refer to "Terms" in [README.md](README.md).
 
 ## Source files
 
 | File | Contents |
 |---|---|
-| `src/main.rs` | Sets the log level and runs the command. |
+| `src/main.rs` | Sets the memory allocator, the log level, and the number of threads. Then it runs the command. |
 | `src/cli.rs` | The command-line arguments (`clap`). |
 | `src/commands/init.rs` | The `init` command. It finds the Git directory, parses the objects, and shows the summary. |
 | `src/commands/analyze.rs`, `src/commands/query.rs` | Commands that show only a message at this time. |
 | `src/parser/mod.rs` | `parse_objects`: pass 1, pass 2, and the last steps. |
 | `src/parser/scan.rs` | Pass 1. |
-| `src/parser/bodies.rs` | Pass 2. |
-| `src/parser/pack.rs` | Pack index files, pack entry headers, zlib streams, deltas, and the delta cache. |
+| `src/parser/bodies.rs` | Pass 2: the work queue, the workers, and the merge of their results. |
+| `src/parser/work.rs` | The delta families of a pack, the work units, and the size of a unit. |
+| `src/parser/pack.rs` | Pack index files, pack entry headers, zlib streams, deltas, and `PackReader`. |
+| `src/parser/delta_cache.rs` | The delta cache, the request times of the bases, and the simulation of the cache in pass 1. |
 | `src/parser/loose.rs` | Loose object headers and bodies. |
 | `src/parser/content.rs` | The parsers for commit, tree, and tag bodies. |
 | `src/parser/refs.rs` | The refs from `packed-refs`, from loose ref files, and from a detached `HEAD`. |
 | `src/models/objects.rs` | `Commit`, `Tree`, `Blob`, `Tag`, `Ref`, `Pack`, `ObjectCopy`, and `ObjectId`. |
-| `src/models/container.rs` | `ObjectContainer`, `HashIndex`, `CommitRaw`, `FileKind`, and `TreeEntries`. |
-| `src/models/name_store.rs` | `NameStore` and `NameId`. |
+| `src/models/container.rs` | `ObjectContainer`, `HashIndex`, `CommitRaw`, `FileKind`, `TreeEntries`, and `TreeEntriesBuilder`. |
+| `src/models/name_store.rs` | `NameStore`, `NameId`, and `NameMap`. |
 | `src/error.rs` | The error types. |
 
 ## Parse sequence
@@ -46,11 +50,14 @@ After the two passes, the parser connects commits, tags, and refs to the objects
                |  ObjectContainer, HashIndex, open pack files
                v
  +---------------------------------------------------------------+
- | Pass 2: bodies (bodies.rs)                                    |
- |   decompress commits, trees, and tags (not blobs)             |
- |   commit body -> CommitRaw                                    |
- |   tree body   -> TreeEntries, NameStore                       |
- |   tag body    -> Tag name and target hash                     |
+ | Pass 2: bodies (bodies.rs), on more than one thread           |
+ |   cut the reads into work units of whole delta families       |
+ |   each worker takes units from one queue and, for each read:  |
+ |     decompress commits, trees, and tags (not blobs)           |
+ |     commit body -> CommitRaw                                  |
+ |     tree body   -> its TreeEntriesBuilder, its NameStore      |
+ |     tag body    -> Tag name and target hash                   |
+ |   merge: one NameStore, TreeEntries in tree index order       |
  +---------------------------------------------------------------+
                |
                v
@@ -101,36 +108,65 @@ Thus the index of an object does not change when Git moves objects into differen
 
 Pass 2 (`read_bodies`) reads the body of each commit, tree, and tag from its primary copy. It does not read blob bodies.
 
-Pass 2 reads the copies in the sequence that pass 1 recorded them. This sequence is one pack file after the other, in offset sequence in each pack file. The loose copies come last. Thus pass 2 also reads each pack file from the start to the end.
+#### Work units
 
-For a copy in a pack file, `PackReader` decompresses the entry. Each `PackReader` has one zlib decoder. It resets the decoder for each entry, and it allocates the output one time, with the size from the entry header. If the entry is a delta, `PackReader` makes the base object and applies the delta to it. `PackReader` keeps the base objects in a delta cache (`DeltaCache`):
+Pass 2 cuts the reads into work units (`units`, `work::work_units`):
 
-- Pass 1 records the base of each delta (`DeltaGraph`). Before pass 2 reads a pack file, it calculates when it needs each base. The cache keeps a base only until its last request.
-- The cache has a byte limit: 1 GiB, or the value of `init --delta-cache-size`. When the cache is full, it removes the bases that pass 2 needs last. If pass 2 needs the new base after all the bases in the cache, the cache does not keep the new base.
+- Each delta has one base. Thus the deltas of a pack make a set of trees, the delta families. A family is an entry that is not a delta, and all the deltas whose chains end at it. `family_roots` finds the family of each entry.
+- A unit contains whole families of one pack. Thus a worker never needs a base that a different worker made, and no base is made two times. `work_units` puts families in a unit, in the sequence of their first read, until the unit has the target number of reads. A family is never cut, so a unit can have more reads than the target. The reads of a unit are in offset sequence.
+- The loose copies are in units of their own, after the units of the packs.
+- `unit_reads` sets the target: about 8 units for each thread, and at most 4,096 reads. Families are small: the largest family of linux has 0.14% of its reads.
+
+#### Workers
+
+The units of all packs and the loose units are one queue. The `rayon` thread pool reads the units in parallel. The workers borrow the open pack files and the result of pass 1, and they only read them. No worker changes the `ObjectContainer` during pass 2.
+
+Each worker keeps its results in its own `Parsed`: the `CommitRaw` records, the tag names and targets, a `TreeEntriesBuilder`, and a `NameStore`. Workers do not share a name store, and they do not use locks for names. A `Parsed` is for one worker, not for one unit: its arrays are a few large allocations. One set for each unit (1,735 units for linux) made the peak memory 3.4 GB higher.
+
+`main.rs` sets the number of threads (`parser::default_threads`): a quarter of the hardware threads, but up to 8 on a small computer, and always one fewer than the computer has. On 128 hardware threads, pass 2 is not faster with more than about 32 threads, and each thread adds to the peak memory. The `RAYON_NUM_THREADS` environment variable sets a different number.
+
+#### Pack reader and delta cache
+
+For each pack unit, the worker makes a `PackReader`. The reader has one zlib decoder. It resets the decoder for each entry, and it allocates the output one time, with the size from the entry header. If the entry is a delta, `PackReader` makes the base object and applies the delta to it. `PackReader` keeps the base objects in a delta cache (`DeltaCache`):
+
+- Pass 1 records the base of each delta (`DeltaGraph`). Before a reader reads its unit, `request_times` calculates when the unit needs each base. It keeps these times in a map with only the entries that the unit needs. The cache keeps a base only until its last request.
+- The cache has a byte limit. The limit of all workers together is 1 GiB, or the value of `init --delta-cache-size`. Each reader gets an equal share. When the cache is full, it removes the bases that the unit needs last. If the unit needs the new base after all the bases in the cache, the cache does not keep the new base.
 - A cache hit gives a reference to the data in the cache. It does not copy the data.
-- Pass 2 releases the cache when it starts the next pack file.
+- A unit needs much less cache than a full pack. For linux, the largest peak of a unit is 30 MB, and the peak of the full pack in one cache was 1.18 GB.
 
-The program uses `mimalloc` as its memory allocator. With the glibc allocator, pass 2 was slow, because the delta cache releases bases of many sizes in a mixed sequence.
+The log shows the hits, misses, and evictions of each pack, summed over its units, and the largest peak of one unit. The simulation of pass 1 (`simulate_cache`) is for a full pack in one cache. Thus its peak is larger than the peak of a unit.
+
+The program uses `mimalloc` as its memory allocator. With the glibc allocator, pass 2 was slow, because the delta cache releases bases of many sizes in a mixed sequence. `main.rs` also sets the mimalloc purge delay to 0. With the default delay, mimalloc gives released memory back to the operating system only after 1 to 10 seconds. In that time, the workers release and allocate much memory: on 32 threads, linux used 12.1 GB in pass 2 with the default delay, and 8.4 GB with no delay.
 
 Pass 2 makes these data from the bodies:
 
 | Object type | Data |
 |---|---|
 | Commit | A `CommitRaw`: the root tree hash, the parent hashes, and the commit time. |
-| Tree | The tree entries in `TreeEntries`, and the entry names in the `NameStore`. |
-| Tag | The tag name and the target hash, in the `Tag`. |
+| Tree | The tree entries in the worker's `TreeEntriesBuilder`, and the entry names in the worker's `NameStore`. |
+| Tag | The tag name and the target hash. The merge writes them in the `Tag`. |
 
 #### Tree entries
 
 `parse_tree` reads the entries of a tree body. For each entry, it does these steps:
 
-1. It puts the entry name in the `NameStore` and gets a `NameId`.
+1. It puts the entry name in the worker's `NameStore` and gets a `NameId`.
 2. It finds the index of the child object in the `HashIndex`. This is possible because the `HashIndex` contains all objects at the end of pass 1.
-3. It records the child index, the `NameId`, and the `FileKind` in the `TreeEntriesBuilder`.
+3. It records the child index, the `NameId`, and the `FileKind` in the worker's `TreeEntriesBuilder`.
 
 A submodule entry has no child index, because it refers to a commit in a different repository. An entry has no child index also when its child is not in the object store.
 
-Pass 2 reads the trees in pack file sequence, not in index sequence. The `TreeEntriesBuilder` records the entries in the sequence that it gets them. At the end of pass 2, `TreeEntriesBuilder::finish` puts the entries in tree index sequence. It does this for one array at a time and releases each source array after it copies it. This decreases the maximum memory that the copy uses.
+A worker reads the trees in unit sequence, not in index sequence. Its `TreeEntriesBuilder` records the entries in the sequence that it gets them, and the span of each tree that it reads.
+
+#### Merge
+
+After all workers are done, `merge` puts their results together:
+
+1. `NameStore::merge` puts the names of each worker's store in one store, in worker sequence. For each worker, it gives a `NameMap` from the worker's `NameId` values to the `NameId` values of the merged store.
+2. The `CommitRaw` records go into one `HashMap`, and the tag names and targets go into the `Tag` objects.
+3. `TreeEntries::merge` puts the entries of all workers in tree index sequence. It changes each `NameId` to the merged `NameId` in the same step. It does this for one array at a time, and it releases the worker arrays after it copies them. This decreases the maximum memory. It copies each array in parallel, in runs of about one million entries.
+
+The `NameId` of a name can be different from one parse to the next, because it depends on which worker found the name first. The tree entries are the same for each parse and each number of threads.
 
 ### Last steps
 
@@ -213,7 +249,7 @@ Each version of a directory has the same entry names again. Thus a large history
 
 The `NameStore` keeps one copy of each different name. Each tree entry keeps a 4-byte `NameId` that refers to its name. The `NameStore` uses the `intaglio` symbol table with the `ahash` hash function.
 
-The `NameStore` keeps names as bytes, because Git does not make it necessary for names to be UTF-8. A `NameId` is correct only with the `NameStore` that made it. Thus `ParsedObjects` keeps the `NameStore` with `TreeEntries`, and `ObjectContainer` does not contain a `NameId`.
+The `NameStore` keeps names as bytes, because Git does not make it necessary for names to be UTF-8. A `NameId` is correct only with the `NameStore` that made it. In pass 2, each worker has its own `NameStore`, and the merge makes one store from them (see "Merge"). Thus `ParsedObjects` keeps the `NameStore` with `TreeEntries`, and `ObjectContainer` does not contain a `NameId`.
 
 ## Git object formats
 
