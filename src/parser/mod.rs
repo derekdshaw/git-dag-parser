@@ -5,6 +5,7 @@ mod loose;
 mod pack;
 mod refs;
 mod scan;
+mod work;
 
 use std::path::Path;
 
