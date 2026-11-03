@@ -25,6 +25,8 @@ The benchmarks use [divan](https://docs.rs/divan). Each one is defined next to t
 
 The inputs are synthetic and are checked once before timing. `parse_objects_repo` needs a repository: set `GDP_BENCH_REPO` and pass `--include-ignored`.
 
+For `parse_objects_repo`, use zed at the commit in "Repositories" (below). If you use a different repository or a different commit, you cannot compare the `parse_objects_repo` results with the runs in this folder.
+
 ```
 cargo bench --features bench --bench parser                       # all micro benchmarks
 cargo bench --features bench --bench parser -- decompress_data    # only names that match
@@ -39,7 +41,7 @@ divan has no saved baselines and no machine-readable output. `scripts/benchmarks
 
 ```
 python3 scripts/benchmarks/bench.py run --label <name>
-GDP_BENCH_REPO=<repo> python3 scripts/benchmarks/bench.py run --label <name> -- --include-ignored
+GDP_BENCH_REPO=/path/to/zed.git python3 scripts/benchmarks/bench.py run --label <name> -- --include-ignored
 python3 scripts/benchmarks/bench.py compare docs/benchmarks/<old>.json docs/benchmarks/<new>.json
 ```
 
@@ -50,6 +52,45 @@ How to read a comparison:
 - Only compare runs from the same host. The header of each file records the host, CPU count and kernel.
 - Allocation counts and bytes do not change between runs of the same code. Compare them exactly.
 - Times vary between runs of the same code. Most medians stay within 5%, but some move by 10–35% (`parse_tree_*`, `delta_result_size_1000`, `apply_delta/65536`, `record_and_finish`). Run each side more than once before you trust a time change, and confirm end-to-end changes with instruction counts from `hyperfine` (below).
+
+## Repositories
+
+The benchmarks and the oracle test use real repositories. These repositories are not in this project. Get them, then give their paths in these environment variables:
+
+- `GDP_BENCH_REPO`: the repository for `parse_objects_repo`. Use zed at the commit below.
+- `GDP_ORACLE_REPOS`: the repositories for `tests/git_oracle.rs`, separated by `:`.
+
+### zed for `parse_objects_repo`
+
+All the runs in this folder use zed at commit `504a7f2cf25b817cda3998cab93473adef15f93c`. A fetch of only this commit gives the same objects on each computer. To get it, use these commands:
+
+```
+git init --bare zed.git
+git -C zed.git fetch --no-tags https://github.com/zed-industries/zed.git 504a7f2cf25b817cda3998cab93473adef15f93c:refs/heads/main
+```
+
+Then set `GDP_BENCH_REPO` to the path of `zed.git`.
+
+If you change this commit, run all the saved benchmarks again on the new commit, and write the new commit here.
+
+### Large repositories
+
+Step 4.1 measures these repositories with `harness.py`, `hyperfine`, and the oracle test. Each one is a full clone (all branches) from the date of its commit, on native storage. A new clone has more objects, so compare a new measurement only with measurements on the same clone.
+
+| Repository | URL | HEAD | Objects | Packs |
+|---|---|---|---:|---:|
+| lage | https://github.com/microsoft/lage | `5586934f687f` (2022-10-08) | 9,294 | 2 |
+| zed | https://github.com/zed-industries/zed | `597e5f8304ee` (2024-11-26) | 286,276 | 1 |
+| git-ms | https://github.com/microsoft/git | `3d796bd35183` (2022-12-12) | 1,014,510 | 5 |
+| vscode | https://github.com/microsoft/vscode | `5bca50de0625` (2024-09-10) | 1,656,020 | 2 |
+| linux | https://github.com/torvalds/linux | `75aa74d52f43` (2024-10-18) | 10,456,133 | 1 |
+
+To compare the parse with git on these repositories, use this command:
+
+```
+GDP_ORACLE_REPOS=/path/to/zed:/path/to/vscode:/path/to/git-ms \
+    cargo test --release --test git_oracle -- --ignored --nocapture
+```
 
 ## Whole-program measurements
 

@@ -3,7 +3,7 @@
 //! minutes. Use a release build:
 //!
 //! ```text
-//! GDP_ORACLE_REPOS=~/perfrepos/zed:~/perfrepos/vscode \
+//! GDP_ORACLE_REPOS=/path/to/zed:/path/to/vscode \
 //!     cargo test --release --test git_oracle -- --ignored --nocapture
 //! ```
 //!

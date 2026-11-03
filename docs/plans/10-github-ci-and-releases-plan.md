@@ -2,7 +2,7 @@
 
 ## Summary
 
-This step adds a GitHub Actions workflow, `.github/workflows/ci.yml`, based on the workflow in `~/r/engraph`.
+This step adds a GitHub Actions workflow, `.github/workflows/ci.yml`, based on the CI workflow of a different Rust project ("the source workflow").
 
 - On each pull request and each push to `main`, CI checks the format, runs clippy, and runs the tests on Linux, macOS, and Windows.
 - On each pull request and each push to `main`, CI also builds and packages the release binary for five targets, as a dry run. The archives are workflow artifacts that expire after 7 days. CI does not make a tag or a GitHub release.
@@ -11,7 +11,7 @@ This step adds a GitHub Actions workflow, `.github/workflows/ci.yml`, based on t
 
 ## Project and status before this step
 
-- Repository: `/home/derekdshaw/r/git-dag-parser` (Rust, one binary and library crate, edition 2021, version `0.1.0`).
+- Repository: this repository (Rust, one binary and library crate, edition 2021, version `0.1.0`).
 - There is no `.github/` directory, no `v*` tag, and no GitHub release. The repository is public.
 - `intaglio` needs Rust 1.85 or later (its `rust-version`). `Cargo.toml` has no `rust-version`.
 - The tests run `git` to make fixture repositories. All GitHub runners have `git`.
@@ -53,10 +53,10 @@ A trial repair of all three (in a temporary copy, not committed) made all tests 
 
 ## Decisions already made
 
-- A merge to `main` never publishes a release. The user publishes a release with a manual run of the workflow (Actions tab, "Run workflow", or `gh workflow run ci.yml --ref main`). This is different from engraph, which tags and publishes on each push to `main` that has a new version.
+- A merge to `main` never publishes a release. The user publishes a release with a manual run of the workflow (Actions tab, "Run workflow", or `gh workflow run ci.yml --ref main`). This is different from the source workflow, which tags and publishes on each push to `main` that has a new version.
 - Pull requests run the full build matrix as a dry run, so that the cross-compile jobs are tested before a release.
-- Base the workflow on the engraph workflow. Use the same action versions: `actions/checkout@v5`, `dtolnay/rust-toolchain@stable`, `actions/cache@v5`, `actions/upload-artifact@v5`, `actions/download-artifact@v5`, `softprops/action-gh-release@v2`.
-- Build these five targets, the same as engraph:
+- Base the workflow on the source workflow. Use the same action versions: `actions/checkout@v5`, `dtolnay/rust-toolchain@stable`, `actions/cache@v5`, `actions/upload-artifact@v5`, `actions/download-artifact@v5`, `softprops/action-gh-release@v2`.
+- Build these five targets, the same as the source workflow:
 
   | Target | Runner | Archive |
   |---|---|---|
@@ -67,9 +67,9 @@ A trial repair of all three (in a temporary copy, not committed) made all tests 
   | `x86_64-pc-windows-msvc` | `windows-latest` | `zip` |
 
 - Archive names: `git-dag-parser-v<version>-<target>.<tar.gz|zip>`.
-- Each archive contains only the binary, `README.md`, and `LICENSE`. engraph also packages install scripts and a document. This project has none.
+- Each archive contains only the binary, `README.md`, and `LICENSE`. The source workflow also packages install scripts and a document. This project has none.
 - Make the tests portable. Do not skip tests on Windows or macOS.
-- Do not copy the engraph jobs `codegraph-live` and `otel-build`. Add a `bench` job in their place (see item 4).
+- Do not copy the other jobs of the source workflow. Add a `bench` job in their place (see item 4).
 
 The jobs:
 
@@ -90,17 +90,17 @@ The jobs:
 2. **Set the minimum Rust version.** Add `rust-version = "1.85"` to `[package]` in `Cargo.toml`. It agrees with `intaglio` and with `README.md`.
 3. **Add `.github/workflows/ci.yml`, job `test`.** Matrix `ubuntu-latest`, `macos-latest`, `windows-latest`, with `fail-fast: false`. Steps: checkout, toolchain with `clippy` and `rustfmt`, cache, `cargo build --verbose`, `cargo test --verbose`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`.
 4. **Job `bench`** (Linux only). `cargo clippy --all-targets --features bench -- -D warnings`. This compiles the benchmark modules, which no other job compiles. Do not run the benchmarks in CI: shared runners give times that are not stable.
-5. **Job `version`.** Read the version from `[package]`, not from `[workspace.package]` as engraph does. The engraph `sed` gives an empty value here, and a tag named `v` would follow. Use: `sed -n '/^\[package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' Cargo.toml`. Stop with an error if the value is empty. Give the output `version=v<version>`.
-6. **Job `build-release`.** Copy the matrix and the steps from the engraph job, with these changes:
+5. **Job `version`.** Read the version from `[package]`, not from `[workspace.package]` as the source workflow does. Its `sed` gives an empty value here, and a tag named `v` would follow. Use: `sed -n '/^\[package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' Cargo.toml`. Stop with an error if the value is empty. Give the output `version=v<version>`.
+6. **Job `build-release`.** Copy the matrix and the steps from the build job of the source workflow, with these changes:
    - `needs: [test, bench, version]`, and no `if`. It runs on pull requests, on pushes to `main`, and on manual runs.
-   - Change `--bin engraph` to `--bin git-dag-parser`.
+   - Use `--bin git-dag-parser`.
    - In the package steps, copy only the binary, `README.md`, and `LICENSE`. Use the version from the `version` job in the archive name.
    - In `actions/upload-artifact`, set `retention-days: 7`. These files are not a release.
-7. **Job `publish-release`.** Replaces the engraph jobs `tag-and-release` and `publish-release`:
+7. **Job `publish-release`.** Replaces the tag and release jobs of the source workflow:
    - `if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'`, `needs: [version, build-release]`, `permissions: contents: write`.
    - Check out with `fetch-depth: 0`. If the tag `v<version>` exists, stop with an error that tells the user to change the version in `Cargo.toml`. Do not move or replace a tag.
    - Make the tag on the commit that was built (`github.sha`) and push it.
-   - Download all artifacts and publish the release with `softprops/action-gh-release@v2`, the same as engraph (`generate_release_notes: true`, `prerelease` if the version contains `-`).
+   - Download all artifacts and publish the release with `softprops/action-gh-release@v2`, the same as the source workflow (`generate_release_notes: true`, `prerelease` if the version contains `-`).
    - Add `workflow_dispatch:` to the `on:` section of the workflow.
 8. **Update `README.md`.** Add a short section about the release archives, the platforms, and how to publish a release with a manual run. Write it in ASD-STE100 Simplified Technical English, the same as the current file.
 
@@ -133,4 +133,4 @@ The jobs:
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 10 from docs/plans/10-github-ci-and-releases-plan.md. Make the tests portable first, show me the diff, and do not commit until I approve.
+> In this repository, do step 10 from docs/plans/10-github-ci-and-releases-plan.md. Make the tests portable first, show me the diff, and do not commit until I approve.

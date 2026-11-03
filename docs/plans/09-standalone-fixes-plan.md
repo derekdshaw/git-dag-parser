@@ -16,7 +16,7 @@ This plan has seven small fixes. Each fix is independent of the others. Each fix
 
 ## Project and status
 
-- Repository: `/home/derekdshaw/r/git-dag-parser` (Rust, binary and library crate).
+- Repository: this repository (Rust, binary and library crate).
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
 - Completed steps at the time of this plan: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs). Commit `8cdd22c`.
 - Completed steps now (2026-10-30): also 4 (two-pass read, hash-ordered indices, object copies) and 4.1 parts 1 and 2 (name store, flat tree entries, `build_relationships` removed). Commit `eacf1b0` on main.
@@ -69,7 +69,7 @@ Also, the `HEAD` of each linked worktree can keep commits alive. `git gc` uses t
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix A (linked worktrees) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In this repository, do fix A (linked worktrees) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 
@@ -107,7 +107,7 @@ Step 4 adds `Pack` and `ObjectCopy` records. This fix adds an `external` flag to
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix B (alternates) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In this repository, do fix B (alternates) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 
@@ -137,7 +137,7 @@ Do not add SHA-256 support. Stop with a clear error. SHA-256 support is a large 
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix C (SHA-256 repositories) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In this repository, do fix C (SHA-256 repositories) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 
@@ -161,7 +161,7 @@ Step 4.1 part 2 (commit `eacf1b0`) removed `relationships.rs`. On 2026-10-30, `i
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix D (empty repository) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In this repository, do fix D (empty repository) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 
@@ -196,7 +196,7 @@ What remains: after step 5, describe "introduced by" and the commit rank (correc
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix E (documentation) from docs/plans/09-standalone-fixes-plan.md. Show me the diff, and do not commit until I approve.
+> In this repository, do fix E (documentation) from docs/plans/09-standalone-fixes-plan.md. Show me the diff, and do not commit until I approve.
 
 ---
 
@@ -204,7 +204,7 @@ What remains: after step 5, describe "introduced by" and the commit rank (correc
 
 ### Problem
 
-The parser uses `indicatif` progress bars. `indicatif` hides a progress bar when the output is not a terminal. In a run on a large monorepo with the output sent to a file, the last line was `Pack header: version 2, 8246392 objects declared`. For the next 15 minutes there was no output. The user cannot see if the run makes progress or has stopped.
+The parser uses `indicatif` progress bars. `indicatif` hides a progress bar when the output is not a terminal. In a run on a large repository with the output sent to a file, the last line was `Pack header: version 2, <count> objects declared`. For the next 15 minutes there was no output. The user cannot see if the run makes progress or has stopped.
 
 ### Work to do
 
@@ -221,7 +221,7 @@ The parser uses `indicatif` progress bars. `indicatif` hides a progress bar when
 
 ### Prompt to start this fix
 
-> In /home/derekdshaw/r/git-dag-parser, do fix F (progress without a terminal) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In this repository, do fix F (progress without a terminal) from docs/plans/09-standalone-fixes-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
 
 ---
 

@@ -132,7 +132,9 @@ mod benches {
     /// A full parse of a real repository. Ignored by default because it
     /// needs a repository and takes seconds per run:
     ///
-    /// `GDP_BENCH_REPO=~/perfrepos/zed cargo bench --features bench --bench parser -- --include-ignored parse_objects_repo`
+    /// `GDP_BENCH_REPO=/path/to/zed.git cargo bench --features bench --bench parser -- --include-ignored parse_objects_repo`
+    ///
+    /// `docs/benchmarks/README.md` gives the zed commit to use.
     #[divan::bench(ignore, sample_count = 3, sample_size = 1)]
     fn parse_objects_repo() -> super::ParsedObjects {
         let repo =

@@ -16,7 +16,7 @@ This step adds the reports that answer the main question of the tool: "Why is th
 
 ## Project and status before this step
 
-- Repository: `/home/derekdshaw/r/git-dag-parser` (Rust, binary and library crate).
+- Repository: this repository (Rust, binary and library crate).
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
 - Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 5 (commit rank and owner), 6 (paths, reflogs, liveness), 7 (SQLite output).
 - The database schema is in `src/store/` (step 7). Important tables: `trees`, `blobs`, `commits`, `paths`, `packs`, `object_copies`, `reflog_entries`, `refs`.
@@ -93,9 +93,9 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 
 ## Make sure the result is correct on real repositories
 
-- Run `init` and `analyze` on `engraph` in `/home/derekdshaw/r`. It has overlapping packs.
-- Run `init` and `analyze` on the large test monorepo. Do not write to it. A manual calculation from its pack indexes found 232,401 objects in more than one pack (up to 6 copies), 4.11 GB of duplicate copies, and a savings range of 2.43 GB to 2.64 GB. The duplicate report must agree with these values.
-- Copy `engraph` to the scratchpad. Do not copy the monorepo (65 GB). Run `git gc --prune=now` on the copy. Compare the real savings with the estimate. Do not run `git gc` on the original repositories.
+- Make a repository with overlapping packs in the scratchpad: clone a public repository, such as lage, then run `git repack -a` without `-d`. The old packs stay, and the new pack has a second copy of their objects.
+- Run `init` and `analyze` on this repository. Calculate the duplicate copies and the savings range from its pack indexes with `git verify-pack -v`. The duplicate report must agree with these values.
+- Copy the repository, and run `git gc --prune=now` on the copy. Compare the real savings with the estimate. Do not run `git gc` on the original.
 - Show the reports to the user.
 
 ## Out of scope
@@ -114,4 +114,4 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 
 ## Prompt to start this step
 
-> In /home/derekdshaw/r/git-dag-parser, do step 8 from docs/plans/08-reports-and-gc-estimate-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
+> In this repository, do step 8 from docs/plans/08-reports-and-gc-estimate-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.
