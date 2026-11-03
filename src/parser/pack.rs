@@ -3,8 +3,7 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use flate2::read::ZlibDecoder;
-use flate2::{Decompress, FlushDecompress};
+use flate2::{Decompress, FlushDecompress, Status};
 
 use super::delta_cache::{pack_reads, request_times, DeltaCache, DeltaCacheStats, RequestTimes};
 use crate::error::ParseError;
@@ -69,6 +68,8 @@ pub struct PackReader<'a> {
     cache: DeltaCache,
     /// The result of a read that is not cached
     out: Vec<u8>,
+    /// One decoder for all entries, reset for each
+    inflater: Decompress,
 }
 
 /// The bytes of an entry
@@ -106,6 +107,7 @@ impl<'a> PackReader<'a> {
             built: vec![false; copies.len()],
             cache: DeltaCache::new(limit),
             out: Vec::new(),
+            inflater: Decompress::new(true),
         }
     }
 
@@ -192,9 +194,13 @@ impl<'a> PackReader<'a> {
             ));
         }
         match self.graph.base(c) {
-            None => decompress_data(&self.data[self.body_start(c)?..]),
+            None => {
+                let (start, size) = self.body_start(c)?;
+                inflate(&mut self.inflater, &self.data[start..], size)
+            }
             Some(b) => {
-                let delta = decompress_data(&self.data[self.delta_start(c)?..])?;
+                let (start, size) = self.delta_start(c)?;
+                let delta = inflate(&mut self.inflater, &self.data[start..], size)?;
                 let base = if first {
                     self.request(b, depth + 1)?
                 } else {
@@ -214,17 +220,19 @@ impl<'a> PackReader<'a> {
         self.copies[pos].offset().expect("pack copy has an offset") as usize
     }
 
-    /// Start of the zlib stream of a whole entry
-    fn body_start(&self, pos: usize) -> Result<usize> {
+    /// Start of the zlib stream of a whole entry, and the object size from
+    /// its header
+    fn body_start(&self, pos: usize) -> Result<(usize, usize)> {
         let offset = self.offset(pos);
-        let (_, _, header_len) = parse_object_header(&self.data[offset..])?;
-        Ok(offset + header_len)
+        let (_, size, header_len) = parse_object_header(&self.data[offset..])?;
+        Ok((offset + header_len, size as usize))
     }
 
-    /// Start of the zlib stream of a delta entry, after its base reference
-    fn delta_start(&self, pos: usize) -> Result<usize> {
+    /// Start of the zlib stream of a delta entry, after its base reference,
+    /// and the size of the delta data from its header
+    fn delta_start(&self, pos: usize) -> Result<(usize, usize)> {
         let offset = self.offset(pos);
-        let (obj_type, _, header_len) = parse_object_header(&self.data[offset..])?;
+        let (obj_type, size, header_len) = parse_object_header(&self.data[offset..])?;
         let (base_offset, payload_start) =
             delta_base(self.data, self.index, offset, obj_type, offset + header_len)?;
         debug_assert_eq!(
@@ -232,7 +240,7 @@ impl<'a> PackReader<'a> {
             self.offset(self.graph.base(pos).unwrap()),
             "the graph and the entry agree on the base"
         );
-        Ok(payload_start)
+        Ok((payload_start, size as usize))
     }
 }
 
@@ -446,14 +454,31 @@ fn parse_ofs_delta_header(data: &[u8]) -> Result<(usize, usize)> {
     Ok((offset, pos))
 }
 
-/// Decompress zlib-compressed data
-fn decompress_data(data: &[u8]) -> Result<Vec<u8>> {
-    let mut decoder = ZlibDecoder::new(data);
-    let mut result = Vec::new();
-    decoder
-        .read_to_end(&mut result)
+/// Inflate a zlib stream of known inflated size into one allocation of
+/// that size. `inflater` is reset and reused for each object. The stream
+/// must end and give exactly `size` bytes. `data` can go on after the
+/// stream, as in a pack, where the next entry follows.
+fn inflate(inflater: &mut Decompress, data: &[u8], size: usize) -> Result<Vec<u8>> {
+    inflater.reset(true);
+    let mut out = Vec::with_capacity(size);
+    // Writes only into the spare capacity, so `out` is never reallocated
+    let status = inflater
+        .decompress_vec(data, &mut out, FlushDecompress::Finish)
         .map_err(|e| ParseError::DecompressionError(e.to_string()))?;
-    Ok(result)
+    if status != Status::StreamEnd {
+        return Err(ParseError::DecompressionError(format!(
+            "zlib stream did not end within the expected {size} bytes"
+        ))
+        .into());
+    }
+    if out.len() != size {
+        return Err(ParseError::DecompressionError(format!(
+            "zlib stream gave {} bytes, expected {size}",
+            out.len()
+        ))
+        .into());
+    }
+    Ok(out)
 }
 
 /// Apply a delta to a base object
@@ -784,10 +809,17 @@ mod benches {
     fn decompress_data(bencher: Bencher, bytes: usize) {
         let body = synthetic_tree(bytes / ENTRY_BYTES);
         let compressed = zlib(&body);
-        assert_eq!(super::decompress_data(&compressed).unwrap(), body);
+        // One decoder for all objects, as each `PackReader` uses it
+        let mut inflater = Decompress::new(true);
+        assert_eq!(
+            super::inflate(&mut inflater, &compressed, body.len()).unwrap(),
+            body
+        );
         bencher
             .counter(BytesCount::of_slice(&body))
-            .bench_local(|| super::decompress_data(black_box(&compressed)).unwrap());
+            .bench_local(|| {
+                super::inflate(&mut inflater, black_box(&compressed), body.len()).unwrap()
+            });
     }
 
     /// Pass 2 rebuilds every deltified tree from its base
@@ -1518,6 +1550,70 @@ mod tests {
     fn read_varint_reads_multi_byte_values() {
         // 300 = 0b10_0101100, low 7 bits first
         assert_eq!(read_varint(&[0xac, 0x02, 0xff]).unwrap(), (300, 2));
+    }
+
+    /// Bytes that do not compress to a few bytes
+    fn sample(len: usize, seed: u8) -> Vec<u8> {
+        (0..len)
+            .map(|i| (i * 31 + seed as usize) as u8 ^ (i >> 7) as u8)
+            .collect()
+    }
+
+    #[test]
+    fn inflate_gives_the_object_in_one_allocation_of_its_size() {
+        let body = sample(5000, 1);
+        let out = inflate(&mut Decompress::new(true), &zlib(&body), body.len()).unwrap();
+        assert_eq!(out, body);
+        assert_eq!(out.capacity(), body.len(), "allocated once, with the size");
+    }
+
+    #[test]
+    fn inflate_stops_at_the_end_of_the_stream() {
+        // In a pack, the next entry follows the stream
+        let body = sample(300, 2);
+        let mut data = zlib(&body);
+        data.extend_from_slice(b"next entry");
+        let out = inflate(&mut Decompress::new(true), &data, body.len()).unwrap();
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn inflate_gives_an_empty_object() {
+        let out = inflate(&mut Decompress::new(true), &zlib(b""), 0).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn inflate_reuses_one_decoder_for_each_object() {
+        let mut inflater = Decompress::new(true);
+        for (len, seed) in [(4000, 3), (17, 4), (70_000, 5)] {
+            let body = sample(len, seed);
+            assert_eq!(inflate(&mut inflater, &zlib(&body), len).unwrap(), body);
+        }
+        // An error does not spoil the decoder for the next object
+        assert!(inflate(&mut inflater, &zlib(&sample(10, 6)), 11).is_err());
+        let body = sample(10, 7);
+        assert_eq!(inflate(&mut inflater, &zlib(&body), 10).unwrap(), body);
+    }
+
+    #[test]
+    fn inflate_rejects_a_stream_shorter_than_the_size() {
+        let body = sample(100, 8);
+        assert!(inflate(&mut Decompress::new(true), &zlib(&body), 101).is_err());
+    }
+
+    #[test]
+    fn inflate_rejects_a_stream_longer_than_the_size() {
+        let body = sample(100, 9);
+        assert!(inflate(&mut Decompress::new(true), &zlib(&body), 99).is_err());
+    }
+
+    #[test]
+    fn inflate_rejects_a_stream_without_its_end() {
+        // All the data is there, but the stream stops before its checksum
+        let body = sample(100, 10);
+        let data = zlib(&body);
+        assert!(inflate(&mut Decompress::new(true), &data[..data.len() - 4], 100).is_err());
     }
 
     #[test]
