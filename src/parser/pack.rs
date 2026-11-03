@@ -456,6 +456,14 @@ fn decompress_data(data: &[u8]) -> Result<Vec<u8>> {
     Ok(result)
 }
 
+/// Inflate a zlib stream of known inflated size into one allocation of
+/// that size. `inflater` is reset and reused for each object. The stream
+/// must end and give exactly `size` bytes. `data` can go on after the
+/// stream, as in a pack, where the next entry follows.
+fn inflate(inflater: &mut Decompress, data: &[u8], size: usize) -> Result<Vec<u8>> {
+    todo!("{:p} {} {}", inflater, data.len(), size)
+}
+
 /// Apply a delta to a base object
 fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
     let mut pos = 0;
@@ -1518,6 +1526,68 @@ mod tests {
     fn read_varint_reads_multi_byte_values() {
         // 300 = 0b10_0101100, low 7 bits first
         assert_eq!(read_varint(&[0xac, 0x02, 0xff]).unwrap(), (300, 2));
+    }
+
+    /// Bytes that do not compress to a few bytes
+    fn sample(len: usize, seed: u8) -> Vec<u8> {
+        (0..len).map(|i| (i * 31 + seed as usize) as u8 ^ (i >> 7) as u8).collect()
+    }
+
+    #[test]
+    fn inflate_gives_the_object_in_one_allocation_of_its_size() {
+        let body = sample(5000, 1);
+        let out = inflate(&mut Decompress::new(true), &zlib(&body), body.len()).unwrap();
+        assert_eq!(out, body);
+        assert_eq!(out.capacity(), body.len(), "allocated once, with the size");
+    }
+
+    #[test]
+    fn inflate_stops_at_the_end_of_the_stream() {
+        // In a pack, the next entry follows the stream
+        let body = sample(300, 2);
+        let mut data = zlib(&body);
+        data.extend_from_slice(b"next entry");
+        let out = inflate(&mut Decompress::new(true), &data, body.len()).unwrap();
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn inflate_gives_an_empty_object() {
+        let out = inflate(&mut Decompress::new(true), &zlib(b""), 0).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn inflate_reuses_one_decoder_for_each_object() {
+        let mut inflater = Decompress::new(true);
+        for (len, seed) in [(4000, 3), (17, 4), (70_000, 5)] {
+            let body = sample(len, seed);
+            assert_eq!(inflate(&mut inflater, &zlib(&body), len).unwrap(), body);
+        }
+        // An error does not spoil the decoder for the next object
+        assert!(inflate(&mut inflater, &zlib(&sample(10, 6)), 11).is_err());
+        let body = sample(10, 7);
+        assert_eq!(inflate(&mut inflater, &zlib(&body), 10).unwrap(), body);
+    }
+
+    #[test]
+    fn inflate_rejects_a_stream_shorter_than_the_size() {
+        let body = sample(100, 8);
+        assert!(inflate(&mut Decompress::new(true), &zlib(&body), 101).is_err());
+    }
+
+    #[test]
+    fn inflate_rejects_a_stream_longer_than_the_size() {
+        let body = sample(100, 9);
+        assert!(inflate(&mut Decompress::new(true), &zlib(&body), 99).is_err());
+    }
+
+    #[test]
+    fn inflate_rejects_a_stream_without_its_end() {
+        // All the data is there, but the stream stops before its checksum
+        let body = sample(100, 10);
+        let data = zlib(&body);
+        assert!(inflate(&mut Decompress::new(true), &data[..data.len() - 4], 100).is_err());
     }
 
     #[test]
