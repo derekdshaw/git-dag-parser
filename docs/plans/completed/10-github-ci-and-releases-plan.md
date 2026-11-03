@@ -130,7 +130,3 @@ The jobs:
 - Put unit tests in the source file. Put tests that use real git repositories in `tests/`.
 - Update `README.md` and `ARCHITECTURE.md` to match the code after this step. Write them in ASD-STE100 Simplified Technical English, the same as the current files.
 - At the end, tell the user what this step does and what the next step is.
-
-## Prompt to start this step
-
-> In this repository, do step 10 from docs/plans/10-github-ci-and-releases-plan.md. Make the tests portable first, show me the diff, and do not commit until I approve.

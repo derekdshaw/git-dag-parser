@@ -20,7 +20,7 @@ This step finds the commit that added each tree and each blob. This commit is th
 - Data that this step uses:
   - `Commit.tree` (index of the root tree), `Commit.parents`, `Commit.boundary`, `Commit.commit_time`, `Commit.hash`.
   - `TreeEntries` (step 4.1): flat arrays `start`, `child` (`u32`), `name` (`NameId`), and `mode`. Use `entries(tree)` to read the entries of one tree.
-  - Indices are in hash order (step 4).
+  - Indices are in hash order.
 - Memory: a large monorepo can have approximately 3.9 million trees, 4.9 million blobs, and 1.2 billion tree entries (an estimate at 50 bytes of tree data for each entry; on linux the real count was 528 million, 34% more than this estimate gave, so plan for about 1.6 billion). Do not copy the entries. Use only `u32` and atomic `u32` arrays with one value for each object.
 - Step 4.1 removed `build_relationships` (`src/parser/relationships.rs`, `WalkResult`, `Commit.tree_deps`, `Commit.blob_deps`, `Tree.commits`, `Blob.commits`, `Tree.paths`, `Blob.paths`). At this time, `init` runs only the parse. This step adds the rank and owner calculation after the parse.
 

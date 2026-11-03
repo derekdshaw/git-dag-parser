@@ -43,7 +43,7 @@ With paths, the tool can answer "which directory made the most tree versions". W
 - Do not keep the full path bytes in memory. Do not make a second `NameStore` for paths. Make the full bytes from the parent chain only when you need them: for the sort in item 4, and for the database write in step 7.
 - Give path ids in the sort order of the full path bytes. Then the ids do not change between runs.
 - `ObjectContainer` does not hold a `NameId`. The paths go in the parse result struct (step 4.1, part 8), next to `TreeEntries` and the `NameStore`. `Tree` and `Blob` keep only the path id.
-- An object gets its path from its introducing parent. If there are many introducing parents, use the lowest (tree index, entry index). Tree indices are in hash order (step 4), so the result does not change between runs.
+- An object gets its path from its introducing parent. If there are many introducing parents, use the lowest (tree index, entry index). Tree indices are in hash order, so the result does not change between runs.
 - A tree edge stores the entry name, not a path id. One tree can be at many paths, so a path is a fact about the object owner, not about the edge.
 - Reflogs are not an object type. Reflog entries are roots for reachability, the same as refs.
 - The stash reflog (`logs/refs/stash`) holds older stash entries. Read it like other reflogs.

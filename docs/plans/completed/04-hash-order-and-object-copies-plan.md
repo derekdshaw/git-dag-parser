@@ -126,7 +126,3 @@ Step 4.1 (memory and I/O at scale): compact tree entries, a name store, a delta 
 - Do not put a "Co-Authored-By" line or other tagline in the commit message.
 - Put unit tests in the source file. Put tests that use real git repositories in `tests/`.
 - At the end, tell the user what this step does and what the next step is.
-
-## Prompt to start this step
-
-> In this repository, do step 4 from docs/plans/completed/04-hash-order-and-object-copies-plan.md. Write the tests first and show me that they fail. Then do the work, show me the diff, and do not commit until I approve.

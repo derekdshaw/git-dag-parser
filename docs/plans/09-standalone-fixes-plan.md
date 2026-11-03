@@ -20,7 +20,7 @@ This plan has seven small fixes. Each fix is independent of the others. Each fix
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
 - Completed steps at the time of this plan: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs). Commit `8cdd22c`.
 - Completed steps now (2026-10-30): also 4 (two-pass read, hash-ordered indices, object copies) and 4.1 parts 1 and 2 (name store, flat tree entries, `build_relationships` removed). Commit `eacf1b0` on main.
-- Other plans in this folder: steps 4, 4.1, and 5 to 8. Some fixes here depend on them. See the table above.
+- Other plans in this folder: steps 4.1 and 5 to 8. Some fixes here depend on them. See the table above.
 - Important files:
   - `src/commands/init.rs`: `find_git_dir` finds the git directory. It is not in the library, so tests cannot use it.
   - `src/parser/mod.rs`: `parse_objects(git_dir)` reads `objects/pack`, loose objects, and refs.
@@ -83,9 +83,9 @@ At this time, the parser does not read this file. A tree entry that points to an
 
 The objects in an alternate store do not use disk space in this repository. Reports must not count them in the size of this repository, and `git gc` in this repository does not remove them.
 
-### Do this fix after step 4
+### Records to change
 
-Step 4 adds `Pack` and `ObjectCopy` records. This fix adds an `external` flag to those records.
+This fix adds an `external` flag to the `Pack` and `ObjectCopy` records.
 
 ### Work to do
 
