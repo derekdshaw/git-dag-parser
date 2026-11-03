@@ -103,11 +103,14 @@ Pass 2 (`read_bodies`) reads the body of each commit, tree, and tag from its pri
 
 Pass 2 reads the copies in the sequence that pass 1 recorded them. This sequence is one pack file after the other, in offset sequence in each pack file. The loose copies come last. Thus pass 2 also reads each pack file from the start to the end.
 
-For a copy in a pack file, `PackReader` decompresses the entry. If the entry is a delta, `PackReader` makes the base object and applies the delta to it. `PackReader` keeps each object that it makes for a delta base in a cache:
+For a copy in a pack file, `PackReader` decompresses the entry. Each `PackReader` has one zlib decoder. It resets the decoder for each entry, and it allocates the output one time, with the size from the entry header. If the entry is a delta, `PackReader` makes the base object and applies the delta to it. `PackReader` keeps the base objects in a delta cache (`DeltaCache`):
 
-- The cache keeps the data in blocks of 64 MB (`DeltaArena`). Thus the cache does not make many small allocations.
-- A base is usually at a lower offset than its delta. Thus the cache usually contains the base when pass 2 reads the delta.
-- The cache has no size limit. Pass 2 releases the cache when it starts the next pack file.
+- Pass 1 records the base of each delta (`DeltaGraph`). Before pass 2 reads a pack file, it calculates when it needs each base. The cache keeps a base only until its last request.
+- The cache has a byte limit: 1 GiB, or the value of `init --delta-cache-size`. When the cache is full, it removes the bases that pass 2 needs last. If pass 2 needs the new base after all the bases in the cache, the cache does not keep the new base.
+- A cache hit gives a reference to the data in the cache. It does not copy the data.
+- Pass 2 releases the cache when it starts the next pack file.
+
+The program uses `mimalloc` as its memory allocator. With the glibc allocator, pass 2 was slow, because the delta cache releases bases of many sizes in a mixed sequence.
 
 Pass 2 makes these data from the bodies:
 
