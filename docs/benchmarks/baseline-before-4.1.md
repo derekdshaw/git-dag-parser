@@ -194,7 +194,7 @@ On linux, pass 1 (`scan_repository`) is 66.7 s inclusive:
 
 `divan` benchmarks are defined next to the code they measure, in `#[cfg(feature = "bench")] mod benches` blocks in the library, so they can call private functions. `benches/parser.rs` runs them and installs `divan`'s allocation profiler. Inputs are synthetic and checked once before timing. `parse_objects_repo` parses a real repository and is ignored unless `--include-ignored` is passed with `GDP_BENCH_REPO` set.
 
-Baseline (`docs/benchmarks/20261028T211041Z-e6c013a-dirty-baseline.json` in the repository; parser code at `e6c013a`, run 2026-10-28, rustc 1.99.1, divan 0.1.21; `parse_objects_repo` on the zed clone at `597e5f8304ee`):
+Baseline (`docs/benchmarks/20261028T211041Z-e6c013a-dirty-baseline.json`, now only in the Git history; parser code at `e6c013a`, run 2026-10-28, rustc 1.99.1, divan 0.1.21; `parse_objects_repo` on the zed clone at `597e5f8304ee`). `docs/benchmarks/20261103T005415Z-eb425b2-baseline` repeats this run on zed `504a7f2`, so its `parse_objects_repo` values are different: 7.21 s, 10,951,847 allocations, 57.3 GB allocated, peak 1.124 GB:
 
 | Benchmark | Median | Throughput | Allocations | Bytes allocated | Reallocations |
 |---|---:|---:|---:|---:|---:|
@@ -228,7 +228,7 @@ python3 scripts/benchmarks/bench.py compare docs/benchmarks/<old>.json docs/benc
 cargo bench --features bench --bench parser -- <filter>                                  # quick run, no record
 ```
 
-`bench.py run` saves the raw table with the commit, the dirty flag, rustc, the divan version, and the host, plus a parsed JSON file, in `docs/benchmarks/` in the repository. `compare` prints the median time and allocation change for each benchmark.
+`bench.py run` saves the raw table with the commit, the dirty flag, rustc, the divan version, the CPU model, the CPU count, and the kernel, plus a parsed JSON file, in `docs/benchmarks/` in the repository. `compare` prints the median time and allocation change for each benchmark.
 
 ## Findings for step 4.1
 

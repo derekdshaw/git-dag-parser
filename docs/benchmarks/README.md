@@ -2,7 +2,7 @@
 
 This folder keeps benchmark results so that changes can be compared with earlier runs. The scripts are in `scripts/benchmarks/`.
 
-`baseline-before-4.1.md` records the whole-program measurements (time, heap, CPU profiles) at commit `e6c013a`, before step 4.1. The divan run from the same commit is `20261028T211041Z-e6c013a-dirty-baseline`.
+`baseline-before-4.1.md` records the whole-program measurements (time, heap, CPU profiles) at commit `e6c013a`, before step 4.1. The divan run of this code is `20261103T005415Z-eb425b2-baseline`. `eb425b2` is the first commit with the benchmarks. It also has `2a1689f`, which reports progress through `tracing`.
 
 ## Micro benchmarks (`cargo bench`)
 
@@ -37,7 +37,7 @@ The library reports progress through `tracing`. The benchmark binary does not in
 
 ## Keep and compare results
 
-divan has no saved baselines and no machine-readable output. `scripts/benchmarks/bench.py` runs the benchmarks, saves the table in this folder with the run details (commit, uncommitted changes, rustc and divan versions, CPUs, kernel), and saves a parsed JSON copy:
+divan has no saved baselines and no machine-readable output. `scripts/benchmarks/bench.py` runs the benchmarks, saves the table in this folder with the run details (commit, uncommitted changes, rustc and divan versions, CPU model, CPU count, kernel), and saves a parsed JSON copy:
 
 ```
 python3 scripts/benchmarks/bench.py run --label <name>
@@ -49,7 +49,7 @@ File names are `<UTC time>-<commit>[-dirty][-<label>]`. `dirty` means the workin
 
 How to read a comparison:
 
-- Only compare runs from the same host. The header of each file records the host, CPU count and kernel.
+- Only compare runs from the same computer. The header of each file records the CPU model, the CPU count, and the kernel.
 - Allocation counts and bytes do not change between runs of the same code. Compare them exactly.
 - Times vary between runs of the same code. Most medians stay within 5%, but some move by 10–35% (`parse_tree_*`, `delta_result_size_1000`, `apply_delta/65536`, `record_and_finish`). Run each side more than once before you trust a time change, and confirm end-to-end changes with instruction counts from `hyperfine` (below).
 
@@ -72,6 +72,8 @@ git -C zed.git fetch --no-tags https://github.com/zed-industries/zed.git 504a7f2
 Then set `GDP_BENCH_REPO` to the path of `zed.git`.
 
 If you change this commit, run all the saved benchmarks again on the new commit, and write the new commit here.
+
+The runs in this folder were made again on 2026-11-03 with this zed commit. Each run is on the commit that it measures, so no run is `dirty`. The earlier runs used a different zed clone. They are only in the Git history.
 
 ### Large repositories
 

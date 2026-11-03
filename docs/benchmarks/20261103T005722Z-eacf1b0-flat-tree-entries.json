@@ -1,12 +1,12 @@
 {
  "meta": {
-  "time_utc": "2026-10-30T00:18:59Z",
-  "commit": "0103dce",
-  "dirty": true,
-  "branch": "flat-tree-entries",
+  "time_utc": "2026-11-03T00:57:22Z",
+  "commit": "eacf1b0",
+  "dirty": false,
+  "branch": "HEAD",
   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
   "divan": "0.1.21",
-  "host": "aiki-enigma",
+  "cpu_model": "AMD Ryzen Threadripper 3990X 64-Core Processor",
   "kernel": "6.6.87.2-microsoft-standard-WSL2",
   "cpus": 128,
   "label": "flat-tree-entries",
@@ -18,197 +18,197 @@
  "benchmarks": {
   "models/name_store/get/1000": {
    "time_ns": {
-    "fastest": 935.6,
-    "slowest": 3638.0,
-    "median": 940.6,
-    "mean": 966.7
+    "fastest": 933.7,
+    "slowest": 2614.0,
+    "median": 943.7,
+    "mean": 962.5
    },
    "samples": 100,
-   "iters": 400,
+   "iters": 100,
    "alloc": {},
    "throughput": {
-    "fastest": "1.068 Gitem/s",
-    "slowest": "274.8 Mitem/s",
-    "median": "1.063 Gitem/s",
-    "mean": "1.034 Gitem/s"
+    "fastest": "1.07 Gitem/s",
+    "slowest": "382.4 Mitem/s",
+    "median": "1.059 Gitem/s",
+    "mean": "1.038 Gitem/s"
    }
   },
   "models/name_store/get/100000": {
    "time_ns": {
-    "fastest": 142600.0,
-    "slowest": 445000.0,
-    "median": 143000.0,
-    "mean": 153500.0
+    "fastest": 134400.0,
+    "slowest": 414300.0,
+    "median": 135400.0,
+    "mean": 142400.0
    },
    "samples": 100,
    "iters": 100,
    "alloc": {},
    "throughput": {
-    "fastest": "701.1 Mitem/s",
-    "slowest": "224.6 Mitem/s",
-    "median": "698.9 Mitem/s",
-    "mean": "651 Mitem/s"
+    "fastest": "743.7 Mitem/s",
+    "slowest": "241.3 Mitem/s",
+    "median": "738.4 Mitem/s",
+    "mean": "701.9 Mitem/s"
    }
   },
   "models/name_store/get/1000000": {
    "time_ns": {
-    "fastest": 11090000.0,
-    "slowest": 14210000.0,
-    "median": 11670000.0,
-    "mean": 11730000.0
+    "fastest": 14610000.0,
+    "slowest": 15610000.0,
+    "median": 14910000.0,
+    "mean": 14930000.0
    },
    "samples": 100,
    "iters": 100,
    "alloc": {},
    "throughput": {
-    "fastest": "90.14 Mitem/s",
-    "slowest": "70.36 Mitem/s",
-    "median": "85.64 Mitem/s",
-    "mean": "85.2 Mitem/s"
+    "fastest": "68.4 Mitem/s",
+    "slowest": "64.05 Mitem/s",
+    "median": "67.05 Mitem/s",
+    "mean": "66.96 Mitem/s"
    }
   },
   "models/name_store/intern_hit/1000": {
    "time_ns": {
-    "fastest": 16030.000000000002,
-    "slowest": 61810.0,
-    "median": 16120.000000000002,
-    "mean": 16990.0
+    "fastest": 16490.0,
+    "slowest": 174300.0,
+    "median": 16740.0,
+    "mean": 18740.0
    },
    "samples": 100,
    "iters": 100,
    "alloc": {},
    "throughput": {
-    "fastest": "62.36 Mitem/s",
-    "slowest": "16.17 Mitem/s",
-    "median": "62.02 Mitem/s",
-    "mean": "58.82 Mitem/s"
+    "fastest": "60.6 Mitem/s",
+    "slowest": "5.735 Mitem/s",
+    "median": "59.7 Mitem/s",
+    "mean": "53.34 Mitem/s"
    }
   },
   "models/name_store/intern_hit/10000": {
    "time_ns": {
-    "fastest": 264500.0,
-    "slowest": 464500.0,
-    "median": 266200.0,
-    "mean": 273600.0
+    "fastest": 267600.0,
+    "slowest": 472500.0,
+    "median": 269700.0,
+    "mean": 277200.0
    },
    "samples": 100,
    "iters": 100,
    "alloc": {},
    "throughput": {
-    "fastest": "37.8 Mitem/s",
-    "slowest": "21.52 Mitem/s",
-    "median": "37.56 Mitem/s",
-    "mean": "36.54 Mitem/s"
+    "fastest": "37.36 Mitem/s",
+    "slowest": "21.16 Mitem/s",
+    "median": "37.07 Mitem/s",
+    "mean": "36.06 Mitem/s"
    }
   },
   "models/name_store/intern_hit/100000": {
    "time_ns": {
-    "fastest": 6822000.0,
-    "slowest": 22670000.0,
-    "median": 10310000.0,
-    "mean": 12410000.0
+    "fastest": 7819000.0,
+    "slowest": 21120000.0,
+    "median": 14860000.0,
+    "mean": 14670000.0
    },
    "samples": 100,
    "iters": 100,
    "alloc": {},
    "throughput": {
-    "fastest": "14.65 Mitem/s",
-    "slowest": "4.41 Mitem/s",
-    "median": "9.699 Mitem/s",
-    "mean": "8.054 Mitem/s"
+    "fastest": "12.78 Mitem/s",
+    "slowest": "4.732 Mitem/s",
+    "median": "6.726 Mitem/s",
+    "mean": "6.813 Mitem/s"
    }
   },
   "models/name_store/intern_hit/1000000": {
    "time_ns": {
-    "fastest": 226600000.0,
-    "slowest": 395200000.0,
-    "median": 272400000.0,
-    "mean": 272500000.0
+    "fastest": 262300000.0,
+    "slowest": 385500000.0,
+    "median": 303400000.0,
+    "mean": 309100000.0
    },
    "samples": 100,
    "iters": 100,
    "alloc": {},
    "throughput": {
-    "fastest": "4.412 Mitem/s",
-    "slowest": "2.53 Mitem/s",
-    "median": "3.669 Mitem/s",
-    "mean": "3.668 Mitem/s"
+    "fastest": "3.811 Mitem/s",
+    "slowest": "2.593 Mitem/s",
+    "median": "3.295 Mitem/s",
+    "mean": "3.234 Mitem/s"
    }
   },
   "parser/parse_objects_repo": {
    "time_ns": {
-    "fastest": 1501000000.0,
-    "slowest": 1512000000.0,
-    "median": 1509000000.0,
-    "mean": 1507000000.0
+    "fastest": 2956000000.0,
+    "slowest": 3163000000.0,
+    "median": 2974000000.0,
+    "mean": 3031000000.0
    },
    "samples": 3,
    "iters": 3,
    "alloc": {
     "max alloc": {
      "count": {
-      "fastest": 64332.0,
-      "slowest": 64332.0,
-      "median": 64332.0,
-      "mean": 64332.0
+      "fastest": 88406.0,
+      "slowest": 88406.0,
+      "median": 88406.0,
+      "mean": 88406.0
      },
      "bytes": {
-      "fastest": 196300000.0,
-      "slowest": 196300000.0,
-      "median": 196300000.0,
-      "mean": 196300000.0
+      "fastest": 410700000.0,
+      "slowest": 410700000.0,
+      "median": 410700000.0,
+      "mean": 410700000.0
      }
     },
     "alloc": {
      "count": {
-      "fastest": 1104557.0,
-      "slowest": 1104557.0,
-      "median": 1104557.0,
-      "mean": 1104557.0
+      "fastest": 1737567.0,
+      "slowest": 1737567.0,
+      "median": 1737567.0,
+      "mean": 1737567.0
      },
      "bytes": {
-      "fastest": 20520000000.0,
-      "slowest": 20520000000.0,
-      "median": 20520000000.0,
-      "mean": 20520000000.0
+      "fastest": 32630000000.000004,
+      "slowest": 32630000000.000004,
+      "median": 32630000000.000004,
+      "mean": 32630000000.000004
      }
     },
     "dealloc": {
      "count": {
-      "fastest": 1040509.0,
-      "slowest": 1040509.0,
-      "median": 1040509.0,
-      "mean": 1040509.0
+      "fastest": 1649186.0,
+      "slowest": 1649186.0,
+      "median": 1649186.0,
+      "mean": 1649186.0
      },
      "bytes": {
-      "fastest": 20540000000.0,
-      "slowest": 20540000000.0,
-      "median": 20540000000.0,
-      "mean": 20540000000.0
+      "fastest": 32720000000.0,
+      "slowest": 32720000000.0,
+      "median": 32720000000.0,
+      "mean": 32720000000.0
      }
     },
     "grow": {
      "count": {
-      "fastest": 566042.0,
-      "slowest": 566042.0,
-      "median": 566042.0,
-      "mean": 566042.0
+      "fastest": 945959.0,
+      "slowest": 945959.0,
+      "median": 945959.0,
+      "mean": 945959.0
      },
      "bytes": {
-      "fastest": 119700000.0,
-      "slowest": 119700000.0,
-      "median": 119700000.0,
-      "mean": 119700000.0
+      "fastest": 238000000.0,
+      "slowest": 238000000.0,
+      "median": 238000000.0,
+      "mean": 238000000.0
      }
     }
    }
   },
   "parser/content/parse_commit": {
    "time_ns": {
-    "fastest": 617.1,
-    "slowest": 1975.0,
-    "median": 628.1,
-    "mean": 658.7
+    "fastest": 617.2,
+    "slowest": 2801.0,
+    "median": 622.7,
+    "mean": 647.3
    },
    "samples": 100,
    "iters": 100,
@@ -245,10 +245,10 @@
   },
   "parser/content/parse_tree_history/1": {
    "time_ns": {
-    "fastest": 7559000.0,
-    "slowest": 13350000.0,
-    "median": 10010000.0,
-    "mean": 10160000.0
+    "fastest": 7359000.0,
+    "slowest": 13030000.0,
+    "median": 8559000.0,
+    "mean": 8594000.0
    },
    "samples": 100,
    "iters": 100,
@@ -297,18 +297,18 @@
     }
    },
    "throughput": {
-    "fastest": "582 MB/s",
-    "slowest": "329.4 MB/s",
-    "median": "439.5 MB/s",
-    "mean": "432.7 MB/s"
+    "fastest": "597.8 MB/s",
+    "slowest": "337.6 MB/s",
+    "median": "514 MB/s",
+    "mean": "511.9 MB/s"
    }
   },
   "parser/content/parse_tree_history/8": {
    "time_ns": {
-    "fastest": 49030000.0,
-    "slowest": 56120000.0,
-    "median": 51830000.0,
-    "mean": 52110000.0
+    "fastest": 48630000.0,
+    "slowest": 67830000.0,
+    "median": 52190000.0,
+    "mean": 53050000.0
    },
    "samples": 100,
    "iters": 100,
@@ -357,18 +357,18 @@
     }
    },
    "throughput": {
-    "fastest": "717.8 MB/s",
-    "slowest": "627.1 MB/s",
-    "median": "679 MB/s",
-    "mean": "675.3 MB/s"
+    "fastest": "723.8 MB/s",
+    "slowest": "518.9 MB/s",
+    "median": "674.3 MB/s",
+    "mean": "663.4 MB/s"
    }
   },
   "parser/content/parse_tree_known_names/100": {
    "time_ns": {
-    "fastest": 5952.0,
-    "slowest": 19830.0,
-    "median": 6114.0,
-    "mean": 6427.0
+    "fastest": 5892.0,
+    "slowest": 16790.0,
+    "median": 5996.0,
+    "mean": 6173.0
    },
    "samples": 100,
    "iters": 100,
@@ -417,18 +417,18 @@
     }
    },
    "throughput": {
-    "fastest": "705.6 MB/s",
-    "slowest": "211.7 MB/s",
-    "median": "686.9 MB/s",
-    "mean": "653.4 MB/s"
+    "fastest": "712.7 MB/s",
+    "slowest": "250 MB/s",
+    "median": "700.3 MB/s",
+    "mean": "680.3 MB/s"
    }
   },
   "parser/content/parse_tree_known_names/1000": {
    "time_ns": {
-    "fastest": 60560.0,
-    "slowest": 113900.0,
-    "median": 61380.0,
-    "mean": 63820.0
+    "fastest": 58440.0,
+    "slowest": 114900.0,
+    "median": 60920.0,
+    "mean": 63420.0
    },
    "samples": 100,
    "iters": 100,
@@ -477,18 +477,18 @@
     }
    },
    "throughput": {
-    "fastest": "693.4 MB/s",
-    "slowest": "368.4 MB/s",
-    "median": "684.1 MB/s",
-    "mean": "658 MB/s"
+    "fastest": "718.5 MB/s",
+    "slowest": "365.2 MB/s",
+    "median": "689.4 MB/s",
+    "mean": "662.1 MB/s"
    }
   },
   "parser/content/parse_tree_known_names/84000": {
    "time_ns": {
-    "fastest": 12440000.0,
-    "slowest": 17830000.0,
-    "median": 14590000.0,
-    "mean": 14710000.0
+    "fastest": 13130000.0,
+    "slowest": 18970000.0,
+    "median": 16420000.000000002,
+    "mean": 16410000.0
    },
    "samples": 100,
    "iters": 100,
@@ -537,18 +537,18 @@
     }
    },
    "throughput": {
-    "fastest": "283.3 MB/s",
-    "slowest": "197.8 MB/s",
-    "median": "241.6 MB/s",
-    "mean": "239.7 MB/s"
+    "fastest": "268.5 MB/s",
+    "slowest": "185.9 MB/s",
+    "median": "214.7 MB/s",
+    "mean": "214.9 MB/s"
    }
   },
   "parser/content/parse_tree_new_names/100": {
    "time_ns": {
-    "fastest": 8771.0,
-    "slowest": 47950.0,
-    "median": 9027.0,
-    "mean": 9548.0
+    "fastest": 8758.0,
+    "slowest": 22870.0,
+    "median": 8956.0,
+    "mean": 9388.0
    },
    "samples": 100,
    "iters": 100,
@@ -597,18 +597,18 @@
     }
    },
    "throughput": {
-    "fastest": "478.8 MB/s",
-    "slowest": "87.59 MB/s",
-    "median": "465.2 MB/s",
-    "mean": "439.8 MB/s"
+    "fastest": "479.5 MB/s",
+    "slowest": "183.5 MB/s",
+    "median": "468.9 MB/s",
+    "mean": "447.3 MB/s"
    }
   },
   "parser/content/parse_tree_new_names/1000": {
    "time_ns": {
-    "fastest": 78420.0,
-    "slowest": 101000.0,
-    "median": 79690.0,
-    "mean": 80870.0
+    "fastest": 77430.0,
+    "slowest": 98310.0,
+    "median": 78830.0,
+    "mean": 80310.0
    },
    "samples": 100,
    "iters": 100,
@@ -657,18 +657,18 @@
     }
    },
    "throughput": {
-    "fastest": "535.5 MB/s",
-    "slowest": "415.5 MB/s",
-    "median": "527 MB/s",
-    "mean": "519.2 MB/s"
+    "fastest": "542.3 MB/s",
+    "slowest": "427.1 MB/s",
+    "median": "532.7 MB/s",
+    "mean": "522.9 MB/s"
    }
   },
   "parser/content/parse_tree_new_names/84000": {
    "time_ns": {
-    "fastest": 16360000.0,
-    "slowest": 24160000.0,
-    "median": 19530000.0,
-    "mean": 19560000.0
+    "fastest": 17150000.0,
+    "slowest": 23930000.0,
+    "median": 19750000.0,
+    "mean": 19980000.0
    },
    "samples": 100,
    "iters": 100,
@@ -731,18 +731,18 @@
     }
    },
    "throughput": {
-    "fastest": "215.5 MB/s",
-    "slowest": "146 MB/s",
-    "median": "180.5 MB/s",
-    "mean": "180.3 MB/s"
+    "fastest": "205.6 MB/s",
+    "slowest": "147.3 MB/s",
+    "median": "178.6 MB/s",
+    "mean": "176.5 MB/s"
    }
   },
   "parser/pack/apply_delta/4096": {
    "time_ns": {
-    "fastest": 102.5,
-    "slowest": 172.6,
-    "median": 107.5,
-    "mean": 108.5
+    "fastest": 101.1,
+    "slowest": 674.7,
+    "median": 104.2,
+    "mean": 113.8
    },
    "samples": 100,
    "iters": 1600,
@@ -777,18 +777,18 @@
     }
    },
    "throughput": {
-    "fastest": "39.93 GB/s",
-    "slowest": "23.7 GB/s",
-    "median": "38.07 GB/s",
-    "mean": "37.7 GB/s"
+    "fastest": "40.46 GB/s",
+    "slowest": "6.065 GB/s",
+    "median": "39.27 GB/s",
+    "mean": "35.93 GB/s"
    }
   },
   "parser/pack/apply_delta/65536": {
    "time_ns": {
-    "fastest": 1171.0,
-    "slowest": 1346.0,
-    "median": 1186.0,
-    "mean": 1192.0
+    "fastest": 1082.0,
+    "slowest": 1401.0,
+    "median": 1098.0,
+    "mean": 1104.0
    },
    "samples": 100,
    "iters": 200,
@@ -823,18 +823,18 @@
     }
    },
    "throughput": {
-    "fastest": "55.95 GB/s",
-    "slowest": "48.66 GB/s",
-    "median": "55.22 GB/s",
-    "mean": "54.94 GB/s"
+    "fastest": "60.53 GB/s",
+    "slowest": "46.77 GB/s",
+    "median": "59.67 GB/s",
+    "mean": "59.33 GB/s"
    }
   },
   "parser/pack/apply_delta/1048576": {
    "time_ns": {
-    "fastest": 21950.0,
-    "slowest": 75390.0,
-    "median": 27350.0,
-    "mean": 27130.0
+    "fastest": 20930.0,
+    "slowest": 199400.0,
+    "median": 21260.0,
+    "mean": 23520.0
    },
    "samples": 100,
    "iters": 100,
@@ -869,18 +869,18 @@
     }
    },
    "throughput": {
-    "fastest": "47.77 GB/s",
-    "slowest": "13.9 GB/s",
-    "median": "38.33 GB/s",
-    "mean": "38.64 GB/s"
+    "fastest": "50.09 GB/s",
+    "slowest": "5.257 GB/s",
+    "median": "49.31 GB/s",
+    "mean": "44.57 GB/s"
    }
   },
   "parser/pack/decompress_data/4096": {
    "time_ns": {
-    "fastest": 8952.0,
-    "slowest": 24150.0,
-    "median": 9147.0,
-    "mean": 9405.0
+    "fastest": 8895.0,
+    "slowest": 11520.0,
+    "median": 9064.0,
+    "mean": 9096.0
    },
    "samples": 100,
    "iters": 100,
@@ -943,18 +943,18 @@
     }
    },
    "throughput": {
-    "fastest": "455 MB/s",
-    "slowest": "168.6 MB/s",
-    "median": "445.3 MB/s",
-    "mean": "433.1 MB/s"
+    "fastest": "457.9 MB/s",
+    "slowest": "353.6 MB/s",
+    "median": "449.4 MB/s",
+    "mean": "447.8 MB/s"
    }
   },
   "parser/pack/decompress_data/65536": {
    "time_ns": {
-    "fastest": 59860.0,
-    "slowest": 95030.0,
-    "median": 60060.0,
-    "mean": 61670.0
+    "fastest": 59060.0,
+    "slowest": 81770.0,
+    "median": 59480.0,
+    "mean": 60570.0
    },
    "samples": 100,
    "iters": 100,
@@ -1017,18 +1017,18 @@
     }
    },
    "throughput": {
-    "fastest": "1.094 GB/s",
-    "slowest": "689.4 MB/s",
-    "median": "1.09 GB/s",
-    "mean": "1.062 GB/s"
+    "fastest": "1.109 GB/s",
+    "slowest": "801.2 MB/s",
+    "median": "1.101 GB/s",
+    "mean": "1.081 GB/s"
    }
   },
   "parser/pack/decompress_data/1048576": {
    "time_ns": {
-    "fastest": 875000.0,
-    "slowest": 1110000.0,
-    "median": 897700.0,
-    "mean": 907100.0
+    "fastest": 883400.0,
+    "slowest": 1322000.0,
+    "median": 911500.0,
+    "mean": 928800.0
    },
    "samples": 100,
    "iters": 100,
@@ -1091,35 +1091,35 @@
     }
    },
    "throughput": {
-    "fastest": "1.198 GB/s",
-    "slowest": "944.1 MB/s",
-    "median": "1.168 GB/s",
-    "mean": "1.155 GB/s"
+    "fastest": "1.186 GB/s",
+    "slowest": "792.8 MB/s",
+    "median": "1.15 GB/s",
+    "mean": "1.128 GB/s"
    }
   },
   "parser/pack/delta_result_size_1000": {
    "time_ns": {
-    "fastest": 144000.0,
-    "slowest": 180100.0,
-    "median": 145800.0,
-    "mean": 149000.0
+    "fastest": 142600.0,
+    "slowest": 180000.0,
+    "median": 143800.0,
+    "mean": 146100.0
    },
    "samples": 100,
    "iters": 100,
    "alloc": {},
    "throughput": {
-    "fastest": "6.942 Mitem/s",
-    "slowest": "5.549 Mitem/s",
-    "median": "6.855 Mitem/s",
-    "mean": "6.708 Mitem/s"
+    "fastest": "7.01 Mitem/s",
+    "slowest": "5.553 Mitem/s",
+    "median": "6.952 Mitem/s",
+    "mean": "6.843 Mitem/s"
    }
   },
   "parser/scan/record_and_finish/100000": {
    "time_ns": {
-    "fastest": 23840000.0,
-    "slowest": 33299999.999999996,
-    "median": 26200000.0,
-    "mean": 26660000.0
+    "fastest": 24640000.0,
+    "slowest": 31860000.0,
+    "median": 27910000.0,
+    "mean": 28050000.0
    },
    "samples": 100,
    "iters": 100,
@@ -1182,10 +1182,10 @@
     }
    },
    "throughput": {
-    "fastest": "4.194 Mitem/s",
-    "slowest": "3.002 Mitem/s",
-    "median": "3.815 Mitem/s",
-    "mean": "3.75 Mitem/s"
+    "fastest": "4.057 Mitem/s",
+    "slowest": "3.138 Mitem/s",
+    "median": "3.582 Mitem/s",
+    "mean": "3.563 Mitem/s"
    }
   }
  }

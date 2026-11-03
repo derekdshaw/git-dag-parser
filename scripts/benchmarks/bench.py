@@ -117,6 +117,17 @@ def parse_table(text: str) -> dict:
     return benches
 
 
+def cpu_model() -> str:
+    """The CPU model from /proc/cpuinfo; other systems have no such file"""
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor()
+
+
 def run(args: argparse.Namespace) -> None:
     repo = Path(args.repo).resolve()
     git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True).stdout.strip()
@@ -131,7 +142,7 @@ def run(args: argparse.Namespace) -> None:
         "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
         "rustc": subprocess.run(["rustc", "-V"], capture_output=True, text=True).stdout.strip(),
         "divan": m.group(1) if m else None,
-        "host": platform.node(),
+        "cpu_model": cpu_model(),
         "kernel": platform.release(),
         "cpus": int(subprocess.run(["nproc"], capture_output=True, text=True).stdout.strip()),
         "label": args.label,
