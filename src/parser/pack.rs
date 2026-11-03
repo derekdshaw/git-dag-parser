@@ -3,7 +3,6 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use flate2::read::ZlibDecoder;
 use flate2::{Decompress, FlushDecompress, Status};
 
 use super::delta_cache::{pack_reads, request_times, DeltaCache, DeltaCacheStats, RequestTimes};
@@ -69,6 +68,8 @@ pub struct PackReader<'a> {
     cache: DeltaCache,
     /// The result of a read that is not cached
     out: Vec<u8>,
+    /// One decoder for all entries, reset for each
+    inflater: Decompress,
 }
 
 /// The bytes of an entry
@@ -106,6 +107,7 @@ impl<'a> PackReader<'a> {
             built: vec![false; copies.len()],
             cache: DeltaCache::new(limit),
             out: Vec::new(),
+            inflater: Decompress::new(true),
         }
     }
 
@@ -192,9 +194,13 @@ impl<'a> PackReader<'a> {
             ));
         }
         match self.graph.base(c) {
-            None => decompress_data(&self.data[self.body_start(c)?..]),
+            None => {
+                let (start, size) = self.body_start(c)?;
+                inflate(&mut self.inflater, &self.data[start..], size)
+            }
             Some(b) => {
-                let delta = decompress_data(&self.data[self.delta_start(c)?..])?;
+                let (start, size) = self.delta_start(c)?;
+                let delta = inflate(&mut self.inflater, &self.data[start..], size)?;
                 let base = if first {
                     self.request(b, depth + 1)?
                 } else {
@@ -214,17 +220,19 @@ impl<'a> PackReader<'a> {
         self.copies[pos].offset().expect("pack copy has an offset") as usize
     }
 
-    /// Start of the zlib stream of a whole entry
-    fn body_start(&self, pos: usize) -> Result<usize> {
+    /// Start of the zlib stream of a whole entry, and the object size from
+    /// its header
+    fn body_start(&self, pos: usize) -> Result<(usize, usize)> {
         let offset = self.offset(pos);
-        let (_, _, header_len) = parse_object_header(&self.data[offset..])?;
-        Ok(offset + header_len)
+        let (_, size, header_len) = parse_object_header(&self.data[offset..])?;
+        Ok((offset + header_len, size as usize))
     }
 
-    /// Start of the zlib stream of a delta entry, after its base reference
-    fn delta_start(&self, pos: usize) -> Result<usize> {
+    /// Start of the zlib stream of a delta entry, after its base reference,
+    /// and the size of the delta data from its header
+    fn delta_start(&self, pos: usize) -> Result<(usize, usize)> {
         let offset = self.offset(pos);
-        let (obj_type, _, header_len) = parse_object_header(&self.data[offset..])?;
+        let (obj_type, size, header_len) = parse_object_header(&self.data[offset..])?;
         let (base_offset, payload_start) =
             delta_base(self.data, self.index, offset, obj_type, offset + header_len)?;
         debug_assert_eq!(
@@ -232,7 +240,7 @@ impl<'a> PackReader<'a> {
             self.offset(self.graph.base(pos).unwrap()),
             "the graph and the entry agree on the base"
         );
-        Ok(payload_start)
+        Ok((payload_start, size as usize))
     }
 }
 
@@ -444,16 +452,6 @@ fn parse_ofs_delta_header(data: &[u8]) -> Result<(usize, usize)> {
     }
 
     Ok((offset, pos))
-}
-
-/// Decompress zlib-compressed data
-fn decompress_data(data: &[u8]) -> Result<Vec<u8>> {
-    let mut decoder = ZlibDecoder::new(data);
-    let mut result = Vec::new();
-    decoder
-        .read_to_end(&mut result)
-        .map_err(|e| ParseError::DecompressionError(e.to_string()))?;
-    Ok(result)
 }
 
 /// Inflate a zlib stream of known inflated size into one allocation of
