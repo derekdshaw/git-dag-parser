@@ -20,6 +20,11 @@ pub enum Commands {
         /// Path to the Git repository (must contain .git directory)
         #[arg(short, long, default_value = ".")]
         repo: PathBuf,
+
+        /// Byte limit of the delta cache, such as 512mb or 2gb. The cache
+        /// keeps resolved delta bases while a pack is read; 0 caches nothing.
+        #[arg(long, value_parser = crate::size::parse_size, default_value = "1gb")]
+        delta_cache_size: u64,
     },
 
     /// Analyze the parsed DAG and generate reports
@@ -45,4 +50,19 @@ pub enum Commands {
         #[arg(short, long)]
         query: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    #[test]
+    fn init_rejects_a_delta_cache_size_that_is_not_valid() {
+        let err = Cli::try_parse_from(["git-dag-parser", "init", "--delta-cache-size", "12x"])
+            .err()
+            .expect("12x is not a valid size");
+        assert!(err.to_string().contains("12x"), "{err}");
+    }
 }

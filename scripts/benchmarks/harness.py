@@ -1,6 +1,10 @@
 """Run `git-dag-parser init` on one repo and record time, memory and phase timings.
 
 Usage: harness.py LABEL REPO_PATH OUT_JSON --bin PATH [--limit-gb N] [--timeout-s N]
+       [-- INIT_ARGS...]
+
+Arguments after `--` go to `init` as they are, for example
+`-- --delta-cache-size 1mb`.
 
 Writes OUT_JSON (summary), plus .stdout, .stderr and .timeline.csv beside it.
 The phase timings are read from the tool's info logs, so RUST_LOG is set to
@@ -12,6 +16,7 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -60,14 +65,22 @@ def main() -> None:
     ap.add_argument("--bin", required=True, help="git-dag-parser binary to run")
     ap.add_argument("--limit-gb", type=float, default=48.0)
     ap.add_argument("--timeout-s", type=float, default=3600.0)
-    args = ap.parse_args()
+    ap.epilog = "Arguments after -- are given to init as they are."
+    # Split at `--` before argparse sees the arguments, so that init options
+    # such as `--delta-cache-size 1mb` are not read as harness options
+    argv = sys.argv[1:]
+    init_args = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, init_args = argv[:i], argv[i + 1:]
+    args = ap.parse_args(argv)
 
     out_txt = Path(args.out).with_suffix(".stdout")
     err_txt = Path(args.out).with_suffix(".stderr")
     start = time.monotonic()
     with out_txt.open("w") as so, err_txt.open("w") as se:
         proc = subprocess.Popen(
-            ["/usr/bin/time", "-v", args.bin, "init", "--repo", args.repo],
+            ["/usr/bin/time", "-v", args.bin, "init", "--repo", args.repo, *init_args],
             stdout=so,
             stderr=se,
             env={"RUST_LOG": __import__("os").environ.get("HARNESS_LOG", "info"), "PATH": "/usr/bin:/bin"},
@@ -99,6 +112,7 @@ def main() -> None:
     result = {
         "label": args.label,
         "repo": args.repo,
+        "init_args": init_args,
         "wall_s": round(wall, 3),
         "peak_rss_anon_mb": round(peak_anon / 1024, 1),
         "peak_rss_file_mb": round(peak_file / 1024, 1),

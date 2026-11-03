@@ -13,6 +13,7 @@ The benchmarks use [divan](https://docs.rs/divan). Each one is defined next to t
 | `pack/delta_result_size_1000` | Pass 1: read the result size of 1,000 compressed deltas |
 | `pack/decompress_data/{4096,65536,1048576}` | Pass 2: inflate tree bodies of 4 KB, 64 KB, and 1 MB |
 | `pack/apply_delta/{4096,65536,1048576}` | Pass 2: rebuild a tree from its base and a delta |
+| `pack/delta_cache_hit` | Pass 2: get a cached delta base from the delta cache. It must make 0 allocations |
 | `content/parse_tree_new_names/{100,1000,84000}` | Parse a tree body with this many entries, every name new to the `NameStore` (the miss path) |
 | `content/parse_tree_known_names/{100,1000,84000}` | The same, with every name already interned and 100,000 other names in the store (the hit path, as when a later version of a directory is parsed) |
 | `content/parse_tree_history/{1,8}` | Parse 2,000 directories of 50 entries (100,000 names in the store) in a scattered order, each one this many times in a row: the common case, where consecutive trees often share names |

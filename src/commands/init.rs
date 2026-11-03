@@ -6,10 +6,11 @@ use tracing::info;
 
 use crate::error::DagError;
 use crate::models::{NameStore, ObjectContainer};
-use crate::parser;
+use crate::parser::{self, ParseOptions};
+use crate::size::format_size;
 
 /// Run the init command: parse a Git repository and summarize what it holds
-pub fn run(repo_path: &Path) -> Result<()> {
+pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
     let start = Instant::now();
 
     info!("Initializing DAG from repository: {}", repo_path.display());
@@ -19,10 +20,13 @@ pub fn run(repo_path: &Path) -> Result<()> {
     info!("Found .git directory: {}", git_dir.display());
 
     // Parse all objects from pack files and loose objects
-    info!("Parsing Git objects...");
+    info!(
+        "Parsing Git objects (delta cache {})...",
+        format_size(options.delta_cache_limit)
+    );
     let parse_start = Instant::now();
     let (_commits_raw, _tree_entries, names, _hash_index, container) =
-        parser::parse_objects(&git_dir).context("Failed to parse Git objects")?;
+        parser::parse_objects_with(&git_dir, options).context("Failed to parse Git objects")?;
     let parse_elapsed = parse_start.elapsed();
 
     print_summary(&container, &names, parse_elapsed, start.elapsed());

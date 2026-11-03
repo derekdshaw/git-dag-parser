@@ -10,6 +10,11 @@
 //! Paths are separated by `:`. Each one can be a work tree or a `.git`
 //! directory. Git commands run with `GIT_OPTIONAL_LOCKS=0`, so nothing is
 //! written to the repositories.
+//!
+//! `GDP_ORACLE_DELTA_CACHE_SIZE` sets the byte limit of the delta cache,
+//! such as `64mb`; an empty value is 0, which caches nothing. Without it
+//! the parse uses the default limit. A small limit checks the parse with
+//! evictions.
 
 mod common;
 
@@ -20,7 +25,8 @@ use std::process::{Command, Stdio};
 
 use common::{hex, parsed_objects};
 use git_dag_parser::models::{ObjectContainer, RefKind};
-use git_dag_parser::parser::parse_objects;
+use git_dag_parser::parser::{parse_objects, parse_objects_with, ParseOptions};
+use git_dag_parser::size::{format_size, parse_size};
 
 /// Mismatches shown for each check before the rest are only counted
 const SHOW: usize = 10;
@@ -304,13 +310,29 @@ fn check_index_order(c: &ObjectContainer, out: &mut Vec<String>) {
 fn parse_matches_git_on_real_repositories() {
     let repos = std::env::var("GDP_ORACLE_REPOS")
         .expect("set GDP_ORACLE_REPOS to repository paths separated by ':'");
+    let delta_cache_limit =
+        std::env::var("GDP_ORACLE_DELTA_CACHE_SIZE")
+            .ok()
+            .map(|s| match s.as_str() {
+                "" => 0,
+                s => parse_size(s).unwrap_or_else(|e| panic!("GDP_ORACLE_DELTA_CACHE_SIZE: {e}")),
+            });
+    if let Some(limit) = delta_cache_limit {
+        println!("delta cache limit {}", format_size(limit));
+    }
     let mut failures = Vec::new();
 
     for repo in repos.split(':').filter(|r| !r.is_empty()) {
         let git_dir = git_dir_of(Path::new(repo));
         println!("{repo}");
+        let parsed = match delta_cache_limit {
+            Some(delta_cache_limit) => {
+                parse_objects_with(&git_dir, &ParseOptions { delta_cache_limit })
+            }
+            None => parse_objects(&git_dir),
+        };
         let (_, _, _, _, container) =
-            parse_objects(&git_dir).unwrap_or_else(|e| panic!("parse of {repo} failed: {e:#}"));
+            parsed.unwrap_or_else(|e| panic!("parse of {repo} failed: {e:#}"));
 
         let mut out = Vec::new();
         check_objects(&git_dir, &container, &mut out);

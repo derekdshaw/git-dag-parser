@@ -4,7 +4,10 @@
 //! for each entry of a pack are known before pass 2 reads the pack. A cached
 //! entry is needed only until its last request.
 
+use std::collections::BinaryHeap;
+
 use anyhow::{anyhow, Result};
+use hashbrown::HashMap;
 
 use super::pack::{DeltaGraph, MAX_DELTA_DEPTH};
 use crate::models::{ObjectCopy, ObjectKind};
@@ -20,13 +23,18 @@ pub fn pack_reads(copies: &[ObjectCopy]) -> impl Iterator<Item = usize> + Clone 
         .map(|(pos, _)| pos)
 }
 
-/// Number of requests for each position: one for each read, and one to the
-/// base of each entry for its first build
-pub fn count_requests(graph: &DeltaGraph, reads: impl Iterator<Item = usize>) -> Vec<u32> {
-    let mut requests = vec![0u32; graph.len()];
+/// Call `f(c, p)` for each request: `c` is the requested entry, and `p` is
+/// the read that makes the request. A read requests its entry, and the
+/// first build of an entry requests its base. In one read an entry gets at
+/// most one request.
+fn for_each_request(
+    graph: &DeltaGraph,
+    reads: impl Iterator<Item = usize>,
+    mut f: impl FnMut(usize, usize),
+) {
     let mut needed = vec![false; graph.len()];
     for p in reads {
-        requests[p] += 1;
+        f(p, p);
         let mut c = p;
         // Only the first build of an entry requests its base
         while !needed[c] {
@@ -34,13 +42,65 @@ pub fn count_requests(graph: &DeltaGraph, reads: impl Iterator<Item = usize>) ->
             match graph.base(c) {
                 None => break,
                 Some(b) => {
-                    requests[b] += 1;
+                    f(b, p);
                     c = b;
                 }
             }
         }
     }
+}
+
+/// Number of requests for each position: one for each read, and one to the
+/// base of each entry for its first build
+pub fn count_requests(graph: &DeltaGraph, reads: impl Iterator<Item = usize>) -> Vec<u32> {
+    let mut requests = vec![0u32; graph.len()];
+    for_each_request(graph, reads, |c, _| requests[c] += 1);
     requests
+}
+
+/// The requests for each position and their times. The time of a request
+/// is the read position `p` that makes it, so the times of a position are
+/// in ascending order and no two are equal.
+pub struct RequestTimes {
+    /// Number of requests for each position (the result of `count_requests`)
+    pub requests: Vec<u32>,
+    /// The times of position `c` are `times[time_start[c]..time_start[c + 1]]`
+    pub time_start: Vec<u32>,
+    pub times: Vec<u32>,
+}
+
+/// The requests and their times, in two passes over `reads`: the first
+/// counts, the second writes the times. When `requests[c]` requests of `c`
+/// are still to come, the next one is `times[time_start[c + 1] - requests[c]]`.
+pub fn request_times(
+    graph: &DeltaGraph,
+    reads: impl Iterator<Item = usize> + Clone,
+) -> RequestTimes {
+    let n = graph.len();
+    let requests = count_requests(graph, reads.clone());
+
+    let mut time_start = vec![0u32; n + 1];
+    let mut total = 0u64;
+    for c in 0..n {
+        total += u64::from(requests[c]);
+        // At most two requests for each entry: its read and one first build
+        time_start[c + 1] = u32::try_from(total).expect("request count fits in u32");
+    }
+
+    let mut times = vec![0u32; time_start[n] as usize];
+    let mut written = vec![0u32; n];
+    for_each_request(graph, reads, |c, p| {
+        times[(time_start[c] + written[c]) as usize] =
+            u32::try_from(p).expect("read position fits in u32");
+        written[c] += 1;
+    });
+    debug_assert_eq!(written, requests);
+
+    RequestTimes {
+        requests,
+        time_start,
+        times,
+    }
 }
 
 /// The result of `simulate_cache` for one pack
@@ -132,6 +192,164 @@ pub fn simulate_cache(
         peak_entries,
         left: entries,
     })
+}
+
+/// Counts kept by a `DeltaCache`
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DeltaCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    /// Entries removed to make room for another
+    pub evictions: u64,
+    /// Entries not inserted because they are larger than the limit
+    pub too_large: u64,
+    /// Entries not inserted because every cached entry is requested sooner
+    pub bypassed: u64,
+    pub peak_bytes: u64,
+    pub peak_entries: usize,
+    /// Entries in the cache now
+    pub left: usize,
+}
+
+/// The resolved entries of one pack that pass 2 needs again, by position,
+/// within a byte limit.
+///
+/// Each entry is kept with the time of its next request. When the cache is
+/// full, the entries whose next requests are farthest away go first; if
+/// the new entry is the farthest, it is not cached and nothing goes. `heap`
+/// orders the entries for that rule. An item whose time is not the entry's
+/// current time, or whose entry is gone, is old and is skipped.
+#[derive(Debug)]
+pub struct DeltaCache {
+    /// The bytes of each entry and the time of its next request
+    entries: HashMap<u32, (Vec<u8>, u32)>,
+    /// Sum of `len()` of all entries
+    bytes: u64,
+    limit: u64,
+    /// (next request, position) of each entry, newest time last pushed
+    heap: BinaryHeap<(u32, u32)>,
+    pub stats: DeltaCacheStats,
+}
+
+impl DeltaCache {
+    /// An empty cache that holds at most `limit` bytes
+    pub fn new(limit: u64) -> Self {
+        Self {
+            entries: HashMap::new(),
+            bytes: 0,
+            limit,
+            heap: BinaryHeap::new(),
+            stats: DeltaCacheStats::default(),
+        }
+    }
+
+    /// The bytes of the entry at `pos`, if it is cached
+    pub fn get(&self, pos: u32) -> Option<&[u8]> {
+        self.entries.get(&pos).map(|(bytes, _)| bytes.as_slice())
+    }
+
+    /// Remove the entry at `pos` and give its bytes to the caller. Its heap
+    /// items become stale.
+    pub fn take(&mut self, pos: u32) -> Option<Vec<u8>> {
+        let (bytes, _) = self.entries.remove(&pos)?;
+        self.bytes -= bytes.len() as u64;
+        self.stats.left = self.entries.len();
+        Some(bytes)
+    }
+
+    /// Cache `bytes` as the entry at `pos`, next requested at time `next`.
+    /// Makes room by evicting the entries requested farthest away, as long
+    /// as they are requested later than `next`. Gives `bytes` back if they
+    /// are not cached: too large for the cache, or requested no sooner than
+    /// every cached entry that would have to go.
+    pub fn insert(&mut self, pos: u32, bytes: Vec<u8>, next: u32) -> Result<(), Vec<u8>> {
+        let len = bytes.len() as u64;
+        if len > self.limit {
+            self.stats.too_large += 1;
+            return Err(bytes);
+        }
+        if let Some((old, _)) = self.entries.remove(&pos) {
+            self.bytes -= old.len() as u64;
+        }
+        if self.bytes + len > self.limit && !self.make_room(self.bytes + len - self.limit, next) {
+            return Err(bytes);
+        }
+        self.bytes += len;
+        self.entries.insert(pos, (bytes, next));
+        self.heap.push((next, pos));
+        self.compact_heap();
+        self.stats.left = self.entries.len();
+        self.stats.peak_bytes = self.stats.peak_bytes.max(self.bytes);
+        self.stats.peak_entries = self.stats.peak_entries.max(self.entries.len());
+        Ok(())
+    }
+
+    /// Free `need` bytes for an entry next requested at `next`, farthest
+    /// next request first. No entry goes until enough entries requested
+    /// later than `next` are found; otherwise every entry stays and the
+    /// result is false.
+    fn make_room(&mut self, need: u64, next: u32) -> bool {
+        let mut victims = Vec::new();
+        let mut freed = 0u64;
+        while freed < need {
+            let (t, p) = self.pop_current();
+            if t <= next {
+                // p is needed no later than the new entry: keep them all
+                self.heap.push((t, p));
+                self.heap.extend(victims);
+                self.stats.bypassed += 1;
+                return false;
+            }
+            freed += self.entries[&p].0.len() as u64;
+            victims.push((t, p));
+        }
+        for (_, p) in victims {
+            let (evicted, _) = self.entries.remove(&p).unwrap();
+            self.bytes -= evicted.len() as u64;
+            self.stats.evictions += 1;
+        }
+        true
+    }
+
+    /// Pop the item with the farthest next request that is not old
+    fn pop_current(&mut self) -> (u32, u32) {
+        loop {
+            let (t, p) = self
+                .heap
+                .pop()
+                .expect("every cached entry has a current heap item");
+            if self
+                .entries
+                .get(&p)
+                .is_some_and(|&(_, current)| current == t)
+            {
+                return (t, p);
+            }
+        }
+    }
+
+    /// Make the heap again from the entries when old items are most of it
+    fn compact_heap(&mut self) {
+        if self.heap.len() > 2 * self.entries.len() {
+            self.heap = self
+                .entries
+                .iter()
+                .map(|(&p, &(_, next))| (next, p))
+                .collect();
+        }
+    }
+
+    /// Set the time of the next request of the entry at `pos`, which must
+    /// be cached. Its earlier heap item becomes stale.
+    pub fn set_next(&mut self, pos: u32, next: u32) {
+        let entry = self
+            .entries
+            .get_mut(&pos)
+            .expect("set_next requires a cached entry");
+        entry.1 = next;
+        self.heap.push((next, pos));
+        self.compact_heap();
+    }
 }
 
 #[cfg(test)]
@@ -289,5 +507,349 @@ mod tests {
             err.to_string().contains("too deep"),
             "unexpected error: {err}"
         );
+    }
+
+    fn cache(limit: u64) -> DeltaCache {
+        DeltaCache::new(limit)
+    }
+
+    fn bytes(n: usize) -> Vec<u8> {
+        vec![b'x'; n]
+    }
+
+    #[test]
+    fn insert_then_get_and_take() {
+        let mut c = cache(100);
+        assert_eq!(c.insert(3, b"abc".to_vec(), 10), Ok(()));
+
+        assert_eq!(c.get(3), Some(&b"abc"[..]));
+        assert_eq!(c.get(4), None);
+        assert_eq!(c.stats.left, 1);
+
+        assert_eq!(c.take(3), Some(b"abc".to_vec()));
+        assert_eq!(c.get(3), None);
+        assert_eq!(c.take(3), None);
+        assert_eq!(c.bytes, 0);
+        assert_eq!(c.stats.left, 0);
+    }
+
+    #[test]
+    fn an_entry_larger_than_the_limit_is_given_back() {
+        let mut c = cache(10);
+        assert_eq!(c.insert(0, bytes(11), 1), Err(bytes(11)));
+        assert_eq!(c.stats.too_large, 1);
+        assert_eq!(c.stats.evictions, 0);
+        assert_eq!(c.get(0), None);
+    }
+
+    #[test]
+    fn the_entry_requested_farthest_away_is_evicted_first() {
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(4), 30).unwrap();
+        c.insert(B as u32, bytes(4), 10).unwrap();
+        // Needs 2 more bytes; A is requested later than B and the new entry
+        c.insert(C as u32, bytes(4), 20).unwrap();
+
+        assert_eq!(c.get(A as u32), None);
+        assert!(c.get(B as u32).is_some());
+        assert!(c.get(C as u32).is_some());
+        assert_eq!(c.bytes, 8);
+        assert_eq!(c.stats.evictions, 1);
+        assert_eq!(c.stats.bypassed, 0);
+    }
+
+    #[test]
+    fn eviction_continues_until_there_is_room() {
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(3), 30).unwrap();
+        c.insert(B as u32, bytes(3), 20).unwrap();
+        c.insert(C as u32, bytes(3), 10).unwrap();
+        c.insert(D as u32, bytes(7), 5).unwrap();
+
+        assert_eq!(c.get(A as u32), None);
+        assert_eq!(c.get(B as u32), None);
+        assert!(c.get(C as u32).is_some());
+        assert!(c.get(D as u32).is_some());
+        assert_eq!(c.stats.evictions, 2);
+    }
+
+    #[test]
+    fn a_new_entry_requested_no_sooner_than_the_cached_ones_is_bypassed() {
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(5), 10).unwrap();
+        c.insert(B as u32, bytes(5), 20).unwrap();
+
+        assert_eq!(c.insert(C as u32, bytes(1), 30), Err(bytes(1)));
+        assert_eq!(c.insert(D as u32, bytes(1), 20), Err(bytes(1)), "a tie");
+
+        assert_eq!(c.stats.bypassed, 2);
+        assert_eq!(c.stats.evictions, 0);
+        assert!(c.get(A as u32).is_some());
+        assert!(c.get(B as u32).is_some());
+        assert_eq!(c.bytes, 10);
+    }
+
+    #[test]
+    fn set_next_changes_the_eviction_order() {
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(5), 30).unwrap();
+        c.insert(B as u32, bytes(5), 10).unwrap();
+        // A is now requested soonest; its (30, A) heap item is stale
+        c.set_next(A as u32, 5);
+
+        // Without the change, A would go; with it, B is the farthest
+        c.insert(C as u32, bytes(5), 8).unwrap();
+
+        assert!(c.get(A as u32).is_some());
+        assert_eq!(c.get(B as u32), None);
+        assert!(c.get(C as u32).is_some());
+        assert_eq!(c.stats.evictions, 1);
+    }
+
+    #[test]
+    fn a_taken_entry_leaves_only_stale_heap_items() {
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(5), 30).unwrap();
+        c.insert(B as u32, bytes(5), 20).unwrap();
+        c.take(A as u32);
+        c.insert(A as u32, bytes(5), 1).unwrap();
+
+        // Room is needed: the stale (30, A) item is skipped, not evicted
+        c.insert(C as u32, bytes(5), 10).unwrap();
+
+        assert!(c.get(A as u32).is_some());
+        assert_eq!(c.get(B as u32), None);
+        assert!(c.get(C as u32).is_some());
+        assert_eq!(c.stats.evictions, 1);
+    }
+
+    #[test]
+    fn inserting_at_a_cached_position_replaces_the_entry() {
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(6), 10).unwrap();
+        c.insert(A as u32, bytes(8), 10).unwrap();
+
+        assert_eq!(c.get(A as u32).map(<[u8]>::len), Some(8));
+        assert_eq!(c.bytes, 8);
+        assert_eq!(c.stats.left, 1);
+        assert_eq!(c.stats.evictions, 0);
+    }
+
+    #[test]
+    fn peaks_record_the_most_held_at_one_time() {
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(4), 10).unwrap();
+        c.insert(B as u32, bytes(4), 20).unwrap();
+        c.take(A as u32);
+        c.take(B as u32);
+        c.insert(C as u32, bytes(1), 30).unwrap();
+
+        assert_eq!(c.stats.peak_bytes, 8);
+        assert_eq!(c.stats.peak_entries, 2);
+        assert_eq!(c.stats.left, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a cached entry")]
+    fn set_next_panics_for_an_entry_that_is_not_cached() {
+        let mut c = cache(10);
+        c.set_next(A as u32, 1);
+    }
+
+    /// The times of each position. Also checks that `requests` is the
+    /// result of `count_requests` and gives the number of times.
+    fn times(bases: &[u32], reads: &[usize]) -> Vec<Vec<u32>> {
+        let graph = DeltaGraph::from_bases(bases.to_vec());
+        let RequestTimes {
+            requests,
+            time_start,
+            times,
+        } = request_times(&graph, reads.iter().copied());
+        assert_eq!(requests, count_requests(&graph, reads.iter().copied()));
+        (0..graph.len())
+            .map(|c| {
+                let own = times[time_start[c] as usize..time_start[c + 1] as usize].to_vec();
+                assert_eq!(own.len(), requests[c] as usize, "position {c}");
+                own
+            })
+            .collect()
+    }
+
+    #[test]
+    fn request_times_gives_each_request_the_position_of_its_read() {
+        // A ← B; reads A, B: the read of B also requests A for its first build
+        assert_eq!(times(&[NO, 0], &[A, B]), vec![vec![0, 1], vec![1]]);
+    }
+
+    #[test]
+    fn request_times_gives_a_shared_base_a_time_for_each_delta() {
+        // A ← B, A ← C; reads A, B, C: the time of a request is the read
+        assert_eq!(
+            times(&[NO, 0, 0], &[A, B, C]),
+            vec![vec![0, 1, 2], vec![1], vec![2]]
+        );
+    }
+
+    #[test]
+    fn request_times_of_a_ref_delta_to_a_later_base() {
+        // B at position 0 is a REF delta to A at position 1; reads B, A:
+        // the read of B requests A before the read of A
+        assert_eq!(times(&[1, NO], &[0, 1]), vec![vec![0], vec![0, 1]]);
+    }
+
+    #[test]
+    fn request_times_of_a_chain_share_the_time_of_the_read() {
+        // A ← B ← C, B ← D, with only C and D read: A and B get the time of
+        // C, the read that first builds them; the read of D adds a request
+        // to B at D's time
+        assert_eq!(
+            times(&[NO, 0, 1, 1], &[C, D]),
+            vec![vec![2], vec![2, 3], vec![2], vec![3]]
+        );
+    }
+
+    #[test]
+    fn request_times_gives_a_position_that_is_not_read_no_times() {
+        // A ← B, and B is a blob, so `pack_reads` does not give it
+        assert_eq!(times(&[NO, 0], &[]), vec![Vec::<u32>::new(), vec![]]);
+    }
+
+    #[test]
+    fn request_times_gives_an_entry_that_is_not_read_and_not_a_base_no_times() {
+        assert_eq!(times(&[NO, NO], &[B]), vec![vec![], vec![1]]);
+    }
+
+    #[test]
+    fn request_times_are_ascending_and_distinct_for_each_position() {
+        // A ← B, A ← C, B ← D; every position read
+        for (c, own) in times(&[NO, 0, 0, 1], &[A, B, C, D]).iter().enumerate() {
+            assert!(own.windows(2).all(|w| w[0] < w[1]), "position {c}: {own:?}");
+        }
+    }
+
+    #[test]
+    fn insert_evicts_nothing_when_the_new_entry_would_not_be_cached() {
+        // X (next 100) and Y (next 20) fill the cache. N (next 50) needs
+        // both to go, but Y is needed sooner than N: X must stay too.
+        let mut c = cache(20);
+        c.insert(A as u32, bytes(10), 100).unwrap();
+        c.insert(B as u32, bytes(10), 20).unwrap();
+
+        assert_eq!(c.insert(C as u32, bytes(20), 50), Err(bytes(20)));
+
+        assert!(c.get(A as u32).is_some(), "X was not evicted for nothing");
+        assert!(c.get(B as u32).is_some());
+        assert_eq!(c.stats.evictions, 0);
+        assert_eq!(c.stats.bypassed, 1);
+        // The heap still orders both for the next insert
+        c.insert(D as u32, bytes(10), 10).unwrap();
+        assert_eq!(c.get(A as u32), None, "X, the farthest, goes for D");
+        assert!(c.get(B as u32).is_some());
+        assert_eq!(c.stats.evictions, 1);
+    }
+
+    #[test]
+    fn rule_b_evicts_the_entry_with_the_farthest_next_request() {
+        let mut c = cache(30);
+        c.insert(A as u32, bytes(10), 5).unwrap();
+        c.insert(B as u32, bytes(10), 9).unwrap();
+        c.insert(C as u32, bytes(10), 7).unwrap();
+
+        c.insert(D as u32, bytes(10), 6).unwrap();
+
+        assert_eq!(c.get(B as u32), None);
+        assert!(c.get(A as u32).is_some());
+        assert!(c.get(C as u32).is_some());
+        assert!(c.get(D as u32).is_some());
+        assert_eq!(c.stats.evictions, 1);
+        assert_eq!(c.stats.bypassed, 0);
+    }
+
+    #[test]
+    fn rule_b_caches_a_new_entry_that_is_not_the_farthest() {
+        // X (next 100) and Y (next 20); N (next 50) needs only X to go
+        let mut c = cache(20);
+        c.insert(A as u32, bytes(10), 100).unwrap();
+        c.insert(B as u32, bytes(10), 20).unwrap();
+
+        c.insert(C as u32, bytes(10), 50).unwrap();
+
+        assert_eq!(c.get(A as u32), None);
+        assert!(c.get(B as u32).is_some());
+        assert!(c.get(C as u32).is_some());
+        assert_eq!(c.stats.evictions, 1);
+        assert_eq!(c.stats.bypassed, 0);
+    }
+
+    #[test]
+    fn rule_b_keeps_the_cached_entry_for_equal_times() {
+        let mut c = cache(20);
+        c.insert(A as u32, bytes(20), 30).unwrap();
+
+        assert_eq!(c.insert(B as u32, bytes(10), 30), Err(bytes(10)));
+
+        assert!(c.get(A as u32).is_some());
+        assert_eq!(c.stats.evictions, 0);
+        assert_eq!(c.stats.bypassed, 1);
+    }
+
+    #[test]
+    fn rule_b_uses_the_time_from_set_next() {
+        // P (next 3) and Q (next 10); after set_next P is the farthest, and
+        // the old item (3, P) is skipped
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(5), 3).unwrap();
+        c.insert(B as u32, bytes(5), 10).unwrap();
+        c.set_next(A as u32, 20);
+
+        c.insert(C as u32, bytes(5), 1).unwrap();
+
+        assert_eq!(c.get(A as u32), None);
+        assert!(c.get(B as u32).is_some());
+        assert_eq!(c.stats.evictions, 1);
+    }
+
+    #[test]
+    fn rule_b_after_take_evicts_the_farthest_entry_that_is_left() {
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(5), 30).unwrap();
+        c.insert(B as u32, bytes(5), 20).unwrap();
+        c.take(A as u32);
+        c.insert(C as u32, bytes(5), 10).unwrap();
+
+        c.insert(D as u32, bytes(5), 5).unwrap();
+
+        assert_eq!(c.get(B as u32), None);
+        assert!(c.get(C as u32).is_some());
+        assert!(c.get(D as u32).is_some());
+        assert_eq!(c.stats.evictions, 1);
+    }
+
+    #[test]
+    fn equal_next_requests_evict_the_larger_position_first() {
+        let mut c = cache(10);
+        c.insert(A as u32, bytes(5), 30).unwrap();
+        c.insert(B as u32, bytes(5), 30).unwrap();
+
+        c.insert(C as u32, bytes(5), 10).unwrap();
+
+        assert!(c.get(A as u32).is_some());
+        assert_eq!(c.get(B as u32), None);
+    }
+
+    #[test]
+    fn the_heap_stays_at_most_twice_the_entry_count() {
+        let mut c = cache(100);
+        c.insert(A as u32, bytes(1), 1).unwrap();
+        c.insert(B as u32, bytes(1), 2).unwrap();
+        for next in 3..1000 {
+            c.set_next(A as u32, next);
+            assert!(c.heap.len() <= 2 * c.entries.len(), "heap {}", c.heap.len());
+        }
+        // The current items survive compaction: A (999) goes before B (2)
+        c.insert(C as u32, bytes(99), 500).unwrap();
+        assert_eq!(c.get(A as u32), None);
+        assert!(c.get(B as u32).is_some());
+        assert!(c.get(C as u32).is_some());
     }
 }

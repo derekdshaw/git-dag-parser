@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::{count_by_kind, hex, parsed_objects, Repo};
 use git_dag_parser::models::ObjectId;
-use git_dag_parser::parser::parse_objects;
+use git_dag_parser::parser::{parse_objects, parse_objects_with, ParseOptions};
 
 #[test]
 fn every_object_matches_git_type_and_sizes() {
@@ -429,4 +429,36 @@ fn cruft_pack_holds_the_unreachable_blob() {
     assert_eq!(copies.len(), 1);
     assert_eq!(copies[0].pack(), Some(cruft[0].index));
     assert!(copies[0].is_primary);
+}
+
+#[test]
+fn a_one_byte_delta_cache_gives_the_same_parse() {
+    for repo in [Repo::with_history(), Repo::with_overlapping_packs()] {
+        assert!(
+            repo.deltified_count() > 0,
+            "fixture must contain deltified objects for this test to mean anything"
+        );
+        let (_, entries, names, _, container) = parse_objects(&repo.git_dir()).unwrap();
+        let (_, small_entries, small_names, _, small_container) = parse_objects_with(
+            &repo.git_dir(),
+            &ParseOptions {
+                delta_cache_limit: 1,
+            },
+        )
+        .unwrap();
+
+        // ObjectContainer has no PartialEq; its Debug output has every field
+        assert_eq!(format!("{small_container:?}"), format!("{container:?}"));
+        for (tree, t) in container.trees.iter().enumerate() {
+            let small: Vec<_> = small_entries
+                .entries(tree)
+                .map(|(child, name, kind)| (child, small_names.get(name), kind))
+                .collect();
+            let full: Vec<_> = entries
+                .entries(tree)
+                .map(|(child, name, kind)| (child, names.get(name), kind))
+                .collect();
+            assert_eq!(small, full, "entries of tree {}", hex(&t.hash));
+        }
+    }
 }

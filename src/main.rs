@@ -1,5 +1,5 @@
 use clap::Parser;
-use git_dag_parser::{cli, commands};
+use git_dag_parser::{cli, commands, parser};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // glibc malloc slows down when pass 2 frees delta cache entries of many
@@ -20,7 +20,15 @@ fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        cli::Commands::Init { repo } => commands::init::run(&repo),
+        cli::Commands::Init {
+            repo,
+            delta_cache_size,
+        } => commands::init::run(
+            &repo,
+            &parser::ParseOptions {
+                delta_cache_limit: delta_cache_size,
+            },
+        ),
         cli::Commands::Analyze { dag_file } => commands::analyze::run(&dag_file),
         cli::Commands::Query { dag_file, query } => commands::query::run(&dag_file, &query),
     }
