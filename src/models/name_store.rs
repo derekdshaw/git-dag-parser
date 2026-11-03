@@ -109,11 +109,13 @@ impl NameMap {
         self.0[id.0 as usize]
     }
 
-    /// Append the merged id of each of `ids` to `out`
+    /// Write the merged id of each of `ids` to the same place in `out`
     #[inline]
-    pub fn extend(&self, out: &mut Vec<NameId>, ids: &[NameId]) {
+    pub fn map_into(&self, out: &mut [NameId], ids: &[NameId]) {
         let table = self.0.as_slice();
-        out.extend(ids.iter().map(|id| table[id.0 as usize]));
+        for (out, id) in out.iter_mut().zip(ids) {
+            *out = table[id.0 as usize];
+        }
     }
 
     /// A map that keeps each of `len` ids, for one store that is used as

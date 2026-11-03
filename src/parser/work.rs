@@ -9,6 +9,21 @@
 
 use super::pack::DeltaGraph;
 
+/// Most reads in one work unit. On linux a unit of this size peaks at
+/// 30 MB of delta cache, well under a thread's share of the default limit.
+const MAX_UNIT_READS: usize = 4096;
+
+/// Work units for each thread, so that a thread that gets the large
+/// families can be balanced by the others
+const UNITS_PER_THREAD: usize = 8;
+
+/// The target number of reads in one work unit, for `reads` reads on
+/// `threads` threads: about `UNITS_PER_THREAD` units for each thread, of at
+/// least one read and at most `MAX_UNIT_READS`.
+pub fn unit_reads(reads: usize, threads: usize) -> usize {
+    (reads / (threads * UNITS_PER_THREAD)).clamp(1, MAX_UNIT_READS)
+}
+
 /// The root of the family of each position: the position at the end of its
 /// base chain. A position that is not a delta is its own root. Pass 1
 /// rejects a cycle of bases, so each chain ends.
@@ -85,6 +100,22 @@ mod tests {
 
     fn units(bases: &[u32], reads: &[usize], unit_reads: usize) -> Vec<Vec<u32>> {
         work_units(&graph(bases), reads.iter().copied(), unit_reads)
+    }
+
+    #[test]
+    fn unit_reads_give_each_thread_several_units() {
+        assert_eq!(unit_reads(64_000, 8), 1_000);
+    }
+
+    #[test]
+    fn unit_reads_are_at_most_the_maximum() {
+        assert_eq!(unit_reads(10_000_000, 1), MAX_UNIT_READS);
+    }
+
+    #[test]
+    fn unit_reads_are_at_least_one() {
+        assert_eq!(unit_reads(10, 8), 1);
+        assert_eq!(unit_reads(0, 1), 1);
     }
 
     #[test]

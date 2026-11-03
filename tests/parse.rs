@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::{count_by_kind, hex, parsed_objects, Repo};
 use git_dag_parser::models::ObjectId;
-use git_dag_parser::parser::{parse_objects, parse_objects_with, ParseOptions};
+use git_dag_parser::parser::{parse_objects, parse_objects_with, ParseOptions, ParsedObjects};
 
 #[test]
 fn every_object_matches_git_type_and_sizes() {
@@ -460,5 +460,66 @@ fn a_one_byte_delta_cache_gives_the_same_parse() {
                 .collect();
             assert_eq!(small, full, "entries of tree {}", hex(&t.hash));
         }
+    }
+}
+
+/// A parse with the default options on a rayon pool of `threads` threads
+fn parse_on_threads(repo: &Repo, threads: usize) -> ParsedObjects {
+    let git_dir = repo.git_dir();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| parse_objects(&git_dir).unwrap())
+}
+
+/// A tree entry as (child, name bytes, mode)
+type Entry = (Option<usize>, Vec<u8>, u32);
+
+/// Everything a parse gives, in a form that two parses can be compared by:
+/// the container's Debug output (ObjectContainer has no PartialEq), the raw
+/// commits sorted by hash, and each tree's entries with their names as
+/// bytes, since name ids depend on which worker interned a name first
+fn snapshot(parsed: &ParsedObjects) -> (String, String, Vec<Vec<Entry>>) {
+    let (commits_raw, entries, names, _, container) = parsed;
+    let mut commits: Vec<_> = commits_raw.iter().collect();
+    commits.sort_by_key(|(hash, _)| **hash);
+    let trees = (0..container.trees.len())
+        .map(|tree| {
+            entries
+                .entries(tree)
+                .map(|(child, name, kind)| (child, names.get(name).to_vec(), kind.mode()))
+                .collect()
+        })
+        .collect();
+    (format!("{container:?}"), format!("{commits:?}"), trees)
+}
+
+/// Fixtures with deltas, several packs, loose objects, non-UTF-8 names, and
+/// tags
+fn fixtures() -> [Repo; 4] {
+    [
+        Repo::with_history(),
+        Repo::with_overlapping_packs(),
+        Repo::with_non_utf8(),
+        Repo::with_refs_and_merges(),
+    ]
+}
+
+#[test]
+fn a_parse_on_8_threads_equals_a_parse_on_1_thread() {
+    for repo in fixtures() {
+        let one = snapshot(&parse_on_threads(&repo, 1));
+        let eight = snapshot(&parse_on_threads(&repo, 8));
+        assert_eq!(eight, one);
+    }
+}
+
+#[test]
+fn two_parses_on_the_same_thread_count_are_equal() {
+    for repo in fixtures() {
+        let first = snapshot(&parse_on_threads(&repo, 8));
+        let second = snapshot(&parse_on_threads(&repo, 8));
+        assert_eq!(second, first);
     }
 }

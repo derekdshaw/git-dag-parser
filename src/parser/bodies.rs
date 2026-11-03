@@ -1,24 +1,28 @@
 //! Pass 2 of parsing: inflate the bodies of commits, trees and tags from
 //! each object's primary copy. Blobs are never inflated.
 //!
-//! Each pack is read in work units of whole delta families, and each unit
-//! in ascending offset order. The loose objects come after the packs. Each
-//! worker gives a `Parsed` with its own names; `merge` puts them together
-//! in worker order.
+//! The reads are cut into work units: whole delta families of one pack, or
+//! a run of loose objects. A rayon pool reads the units of all packs and
+//! the loose objects as one queue, each pack unit in ascending offset
+//! order. Each thread gives a `Parsed` with its own names; `merge` puts
+//! them together in thread order.
 
+use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use hashbrown::HashMap;
-use indicatif::ProgressStyle;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use tracing::info;
 
 use super::content::{parse_commit, parse_tag, parse_tree, TagRaw};
 use super::delta_cache::{pack_reads, DeltaCacheStats};
 use super::loose::read_loose_object;
 use super::pack::PackReader;
-use super::scan::Scanned;
-use super::work::work_units;
+use super::scan::{OpenPack, Scan, Scanned};
+use super::work::{unit_reads, work_units};
 use crate::error::ParseError;
 use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeEntries, TreeEntriesBuilder};
 use crate::models::{NameStore, ObjectId, ObjectKind};
@@ -33,25 +37,27 @@ pub struct Bodies {
     pub names: NameStore,
 }
 
-/// Target number of reads in one work unit
-const UNIT_READS: usize = 4096;
+/// The reads of one work unit
+enum Unit {
+    /// Positions in pack `pack` of whole delta families, ascending
+    Pack { pack: usize, reads: Vec<u32> },
+    /// Positions in `container.copies` of primary loose copies
+    Loose(Vec<usize>),
+}
 
 /// Read every commit, tree and tag body and fill in what pass 1 could not
 /// know: commit headers, tree entries, and tag names and targets.
 ///
-/// Each pack is read in work units of whole delta families (see `work`),
-/// one unit at a time, so each unit's reader gets the whole
-/// `delta_cache_limit`. The loose objects come after the packs.
+/// Runs on the current rayon pool. Each thread's readers get an equal share
+/// of `delta_cache_limit`, so the caches of all threads stay within it.
 pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodies> {
     let start = Instant::now();
+    let threads = rayon::current_num_threads();
     let Scanned {
         scan,
         packs,
         objects_dir,
     } = scanned;
-
-    // Pass 2 has one worker
-    let mut parsed = Parsed::default();
 
     let to_read =
         scan.container.commits.len() + scan.container.trees.len() + scan.container.tags.len();
@@ -63,45 +69,152 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
             .progress_chars("#>-"),
     );
 
-    for open in packs.iter() {
-        let copies =
-            &scan.container.copies[open.first_copy..open.first_copy + open.index.entries.len()];
-        let units = work_units(&open.graph, pack_reads(copies), UNIT_READS);
-        let mut stats = DeltaCacheStats::default();
-        for unit in &units {
-            let reads = unit.iter().map(|&p| p as usize);
-            let mut reader = PackReader::new(
-                &open.data,
-                &open.index,
-                &open.graph,
-                copies,
-                reads.clone(),
-                delta_cache_limit,
-            );
-            for pos in reads {
-                let id = copies[pos].object();
-                let hash = scan.container.hash_of(id);
-                let body = reader.read(pos).with_context(|| {
-                    format!(
-                        "Failed to inflate {} at offset {} of {}",
-                        hex(&hash),
-                        copies[pos].offset().unwrap_or(0),
-                        open.file.pack.name
-                    )
-                })?;
-                parsed.add(id, &hash, body, &scan.index)?;
-                progress.inc(1);
+    let units = units(scan, packs, unit_reads(to_read, threads));
+    // One for each thread of the pool, and one for the calling thread: rayon
+    // runs a unit there when it does not split the units, as with one unit.
+    // A thread locks only its own.
+    let workers: Vec<Mutex<Parsed>> = (0..=threads).map(|_| Mutex::default()).collect();
+    let cache_limit = delta_cache_limit / threads as u64;
+    let (scan_ref, packs_ref) = (&*scan, &*packs);
+    let unit_stats = units
+        .par_iter()
+        .map(|unit| {
+            let thread = rayon::current_thread_index().unwrap_or(threads);
+            let mut parsed = workers[thread].lock().expect("no worker panicked");
+            match unit {
+                Unit::Pack { pack, reads } => {
+                    let stats = read_pack_unit(
+                        scan_ref,
+                        &packs_ref[*pack],
+                        reads,
+                        cache_limit,
+                        &mut parsed,
+                        &progress,
+                    )?;
+                    Ok(Some((*pack, stats)))
+                }
+                Unit::Loose(positions) => {
+                    read_loose_unit(scan_ref, objects_dir, positions, &mut parsed, &progress)?;
+                    Ok(None)
+                }
             }
-            stats.add(&reader.stats());
-        }
-        log_cache(&open.file.pack.name, units.len(), &stats);
+        })
+        .collect::<Result<Vec<_>>>()?;
+    progress.finish_and_clear();
+
+    // Units and summed cache stats of each pack
+    let mut pack_stats = vec![(0, DeltaCacheStats::default()); packs.len()];
+    for (pack, stats) in unit_stats.into_iter().flatten() {
+        pack_stats[pack].0 += 1;
+        pack_stats[pack].1.add(&stats);
+    }
+    for (open, (count, stats)) in packs.iter().zip(&pack_stats) {
+        log_cache(&open.file.pack.name, *count, stats);
     }
 
-    for (pos, copy) in scan.container.copies.iter().enumerate() {
-        let id = copy.object();
-        if copy.pack().is_some() || id.kind() == ObjectKind::Blob || scan.primary(id) != pos {
-            continue;
-        }
+    let parts = workers
+        .into_iter()
+        .map(|w| w.into_inner().expect("no worker panicked"))
+        .collect();
+    let (bodies, tags) = merge(
+        parts,
+        scan.container.commits.len(),
+        scan.container.trees.len(),
+    )?;
+    for (i, raw) in tags {
+        let tag = &mut scan.container.tags[i];
+        tag.name = raw.name;
+        tag.target_hash = raw.target;
+    }
+    info!(
+        "Pass 2 (bodies): {} commits, {} trees ({} entries), {} tags on {} threads in {:?}",
+        bodies.commits_raw.len(),
+        bodies.tree_entries.len(),
+        bodies.tree_entries.entry_count(),
+        scan.container.tags.len(),
+        threads,
+        start.elapsed()
+    );
+
+    Ok(bodies)
+}
+
+/// The work units of all packs, in pack order, then the primary loose
+/// copies of commits, trees and tags in runs of `unit_reads`
+fn units(scan: &Scan, packs: &[OpenPack], unit_reads: usize) -> Vec<Unit> {
+    let mut units = Vec::new();
+    for (pack, open) in packs.iter().enumerate() {
+        let copies =
+            &scan.container.copies[open.first_copy..open.first_copy + open.index.entries.len()];
+        units.extend(
+            work_units(&open.graph, pack_reads(copies), unit_reads)
+                .into_iter()
+                .map(|reads| Unit::Pack { pack, reads }),
+        );
+    }
+    let loose: Vec<usize> = scan
+        .container
+        .copies
+        .iter()
+        .enumerate()
+        .filter(|(pos, copy)| {
+            let id = copy.object();
+            copy.pack().is_none() && id.kind() != ObjectKind::Blob && scan.primary(id) == *pos
+        })
+        .map(|(pos, _)| pos)
+        .collect();
+    units.extend(loose.chunks(unit_reads).map(|c| Unit::Loose(c.to_vec())));
+    units
+}
+
+/// Read the bodies at positions `reads` of pack `open` into `parsed`, with
+/// a reader whose delta cache holds at most `cache_limit` bytes
+fn read_pack_unit(
+    scan: &Scan,
+    open: &OpenPack,
+    reads: &[u32],
+    cache_limit: u64,
+    parsed: &mut Parsed,
+    progress: &ProgressBar,
+) -> Result<DeltaCacheStats> {
+    let copies =
+        &scan.container.copies[open.first_copy..open.first_copy + open.index.entries.len()];
+    let reads = reads.iter().map(|&p| p as usize);
+    let mut reader = PackReader::new(
+        &open.data,
+        &open.index,
+        &open.graph,
+        copies,
+        reads.clone(),
+        cache_limit,
+    );
+    for pos in reads {
+        let id = copies[pos].object();
+        let hash = scan.container.hash_of(id);
+        let body = reader.read(pos).with_context(|| {
+            format!(
+                "Failed to inflate {} at offset {} of {}",
+                hex(&hash),
+                copies[pos].offset().unwrap_or(0),
+                open.file.pack.name
+            )
+        })?;
+        parsed.add(id, &hash, body, &scan.index)?;
+        progress.inc(1);
+    }
+    Ok(reader.stats())
+}
+
+/// Read the loose objects of the copies at `positions` into `parsed`
+fn read_loose_unit(
+    scan: &Scan,
+    objects_dir: &Path,
+    positions: &[usize],
+    parsed: &mut Parsed,
+    progress: &ProgressBar,
+) -> Result<()> {
+    for &pos in positions {
+        let id = scan.container.copies[pos].object();
         let hash = scan.container.hash_of(id);
         let path = loose_path(objects_dir, &hash);
         let (kind, body) = read_loose_object(&path)
@@ -118,28 +231,7 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
         parsed.add(id, &hash, &body, &scan.index)?;
         progress.inc(1);
     }
-
-    progress.finish_and_clear();
-    let (bodies, tags) = merge(
-        vec![parsed],
-        scan.container.commits.len(),
-        scan.container.trees.len(),
-    )?;
-    for (i, raw) in tags {
-        let tag = &mut scan.container.tags[i];
-        tag.name = raw.name;
-        tag.target_hash = raw.target;
-    }
-    info!(
-        "Pass 2 (bodies): {} commits, {} trees ({} entries), {} tags in {:?}",
-        bodies.commits_raw.len(),
-        bodies.tree_entries.len(),
-        bodies.tree_entries.entry_count(),
-        scan.container.tags.len(),
-        start.elapsed()
-    );
-
-    Ok(bodies)
+    Ok(())
 }
 
 /// What the bodies one worker reads give, before it goes into the
@@ -250,7 +342,7 @@ fn log_cache(pack_name: &str, units: usize, s: &DeltaCacheStats) {
 }
 
 /// `objects/xx/yyyy...` for a hash
-fn loose_path(objects_dir: &std::path::Path, hash: &ObjectHash) -> std::path::PathBuf {
+fn loose_path(objects_dir: &Path, hash: &ObjectHash) -> std::path::PathBuf {
     let hex = hex(hash);
     objects_dir.join(&hex[..2]).join(&hex[2..])
 }

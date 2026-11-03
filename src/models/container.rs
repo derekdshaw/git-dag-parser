@@ -1,4 +1,5 @@
 use hashbrown::HashMap;
+use rayon::prelude::*;
 
 use super::name_store::{NameId, NameMap};
 use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, Tag, Tree};
@@ -375,7 +376,7 @@ impl TreeEntries {
     ///
     /// The arrays are gathered one at a time, and the builders' copy of
     /// each is freed right after, so the peak is the entries and one more
-    /// array.
+    /// array. Each array is gathered in parallel on the current rayon pool.
     pub fn merge(trees: usize, parts: Vec<(TreeEntriesBuilder, &NameMap)>) -> TreeEntries {
         let (mut builders, maps): (Vec<_>, Vec<_>) = parts.into_iter().unzip();
         // The builder of each tree and its span there; trees that are never
@@ -395,30 +396,25 @@ impl TreeEntries {
             total += u64::from(count);
             start.push(total);
         }
-        let child = gather(
-            &spans,
-            builders
-                .iter_mut()
-                .map(|b| std::mem::take(&mut b.child))
-                .collect(),
-            |out, _, c| out.extend_from_slice(c),
-        );
-        let name = gather(
-            &spans,
-            builders
-                .iter_mut()
-                .map(|b| std::mem::take(&mut b.name))
-                .collect(),
-            |out, b, n| maps[b].extend(out, n),
-        );
-        let mode = gather(
-            &spans,
-            builders
-                .iter_mut()
-                .map(|b| std::mem::take(&mut b.mode))
-                .collect(),
-            |out, _, m| out.extend_from_slice(m),
-        );
+        let Some(any_name) = builders.iter().find_map(|b| b.name.first().copied()) else {
+            // No entries at all
+            return TreeEntries {
+                start,
+                ..TreeEntries::default()
+            };
+        };
+        let child = builders.iter_mut().map(|b| std::mem::take(&mut b.child));
+        let child = gather(&start, &spans, child.collect(), 0, |out, _, c| {
+            out.copy_from_slice(c)
+        });
+        let name = builders.iter_mut().map(|b| std::mem::take(&mut b.name));
+        let name = gather(&start, &spans, name.collect(), any_name, |out, b, n| {
+            maps[b].map_into(out, n)
+        });
+        let mode = builders.iter_mut().map(|b| std::mem::take(&mut b.mode));
+        let mode = gather(&start, &spans, mode.collect(), 0, |out, _, m| {
+            out.copy_from_slice(m)
+        });
         TreeEntries {
             start,
             child,
@@ -428,28 +424,55 @@ impl TreeEntries {
     }
 }
 
-/// The elements of `sources` picked out span by span, dropping `sources`.
-/// `copy` appends the elements of one span, with the index of its source.
-fn gather<T: Copy>(
+/// Entries of tree index order that one task of the gather fills
+#[cfg(not(test))]
+const GATHER_CHUNK: u64 = 1 << 20;
+/// Small, so that the tests split their few entries into several tasks
+#[cfg(test)]
+const GATHER_CHUNK: u64 = 2;
+
+/// The elements of `sources` picked out span by span, in parallel over
+/// runs of trees of about `GATHER_CHUNK` entries. `copy` fills the place
+/// of one span from it, with the index of its source. `fill` is any value,
+/// overwritten by the spans. Drops `sources`.
+fn gather<T: Copy + Send + Sync>(
+    start: &[u64],
     spans: &[(u32, u64, u32)],
     sources: Vec<Vec<T>>,
-    mut copy: impl FnMut(&mut Vec<T>, usize, &[T]),
+    fill: T,
+    copy: impl Fn(&mut [T], usize, &[T]) + Sync,
 ) -> Vec<T> {
-    let total: usize = spans.iter().map(|&(_, _, count)| count as usize).sum();
-    let mut out = Vec::with_capacity(total);
-    for &(source, begin, count) in spans {
-        // A tree that was never recorded has no source
-        if count == 0 {
-            continue;
+    let mut out = vec![fill; *start.last().expect("start has a sentinel") as usize];
+    // Cut the output at tree boundaries into runs of about GATHER_CHUNK
+    let mut runs = Vec::new();
+    let mut rest = out.as_mut_slice();
+    let mut first = 0;
+    while first < spans.len() {
+        let mut end = first + 1;
+        while end < spans.len() && start[end + 1] - start[first] <= GATHER_CHUNK {
+            end += 1;
         }
-        let source = source as usize;
-        let begin = begin as usize;
-        copy(
-            &mut out,
-            source,
-            &sources[source][begin..begin + count as usize],
-        );
+        let (run, tail) =
+            std::mem::take(&mut rest).split_at_mut((start[end] - start[first]) as usize);
+        runs.push((first..end, run));
+        rest = tail;
+        first = end;
     }
+    runs.into_par_iter().for_each(|(trees, run)| {
+        let mut at = 0;
+        for &(source, begin, count) in &spans[trees] {
+            let (source, begin, count) = (source as usize, begin as usize, count as usize);
+            // A tree that was never recorded has no source
+            if count > 0 {
+                copy(
+                    &mut run[at..at + count],
+                    source,
+                    &sources[source][begin..begin + count],
+                );
+                at += count;
+            }
+        }
+    });
     out
 }
 
