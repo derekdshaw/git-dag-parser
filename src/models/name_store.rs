@@ -86,6 +86,42 @@ impl NameStore {
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
+
+    /// Intern every name of `other` in this store. The map gives, for each
+    /// id that `other` issued, the id of the same name in this store.
+    pub fn merge(&mut self, other: &NameStore) -> Result<NameMap, ParseError> {
+        let mut map = vec![NameId(0); other.len()];
+        for (symbol, bytes) in other.table.iter() {
+            map[symbol.id() as usize] = self.intern(bytes)?;
+        }
+        Ok(NameMap(map))
+    }
+}
+
+/// The ids of one store mapped to the ids of the store it was merged into
+#[derive(Debug)]
+pub struct NameMap(Vec<NameId>);
+
+impl NameMap {
+    /// The merged id of `id`
+    #[inline]
+    pub fn get(&self, id: NameId) -> NameId {
+        self.0[id.0 as usize]
+    }
+
+    /// Append the merged id of each of `ids` to `out`
+    #[inline]
+    pub fn extend(&self, out: &mut Vec<NameId>, ids: &[NameId]) {
+        let table = self.0.as_slice();
+        out.extend(ids.iter().map(|id| table[id.0 as usize]));
+    }
+
+    /// A map that keeps each of `len` ids, for one store that is used as
+    /// it is
+    #[cfg(test)]
+    pub fn identity(len: usize) -> Self {
+        Self((0..len as u32).map(NameId).collect())
+    }
 }
 
 #[cfg(feature = "bench")]
@@ -195,6 +231,43 @@ mod tests {
 
         assert_eq!(store.len(), 3);
         assert_eq!(store.total_bytes(), 8);
+    }
+
+    #[test]
+    fn merge_maps_equal_names_to_one_id() {
+        let mut a = NameStore::new();
+        let a_x = a.intern(b"x").unwrap();
+        let a_y = a.intern(b"y").unwrap();
+        // The same names in another order, and one new name
+        let mut b = NameStore::new();
+        let b_z = b.intern(b"z").unwrap();
+        let b_y = b.intern(b"y").unwrap();
+        let b_x = b.intern(b"x").unwrap();
+
+        let map = a.merge(&b).unwrap();
+
+        assert_eq!(map.get(b_x), a_x);
+        assert_eq!(map.get(b_y), a_y);
+        assert_eq!(a.get(map.get(b_z)), b"z");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a.total_bytes(), 3);
+    }
+
+    #[test]
+    fn merge_into_an_empty_store_keeps_every_name() {
+        let mut part = NameStore::new();
+        let ids: Vec<_> = [&b"a"[..], b"caf\xe9", b""]
+            .iter()
+            .map(|n| part.intern(n).unwrap())
+            .collect();
+
+        let mut merged = NameStore::new();
+        let map = merged.merge(&part).unwrap();
+
+        for id in ids {
+            assert_eq!(merged.get(map.get(id)), part.get(id));
+        }
+        assert_eq!(merged.len(), part.len());
     }
 
     #[test]

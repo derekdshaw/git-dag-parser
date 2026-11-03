@@ -2,7 +2,9 @@
 //! each object's primary copy. Blobs are never inflated.
 //!
 //! Each pack is read in work units of whole delta families, and each unit
-//! in ascending offset order. The loose objects come after the packs.
+//! in ascending offset order. The loose objects come after the packs. Each
+//! worker gives a `Parsed` with its own names; `merge` puts them together
+//! in worker order.
 
 use std::time::Instant;
 
@@ -48,7 +50,8 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
         objects_dir,
     } = scanned;
 
-    let mut parsed = Parsed::new(scan.container.commits.len(), scan.container.trees.len());
+    // Pass 2 has one worker
+    let mut parsed = Parsed::default();
 
     let to_read =
         scan.container.commits.len() + scan.container.trees.len() + scan.container.tags.len();
@@ -117,54 +120,46 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
     }
 
     progress.finish_and_clear();
-    let Parsed {
-        commits_raw,
-        trees,
-        names,
-        tags,
-    } = parsed;
+    let (bodies, tags) = merge(
+        vec![parsed],
+        scan.container.commits.len(),
+        scan.container.trees.len(),
+    )?;
     for (i, raw) in tags {
         let tag = &mut scan.container.tags[i];
         tag.name = raw.name;
         tag.target_hash = raw.target;
     }
-    let tree_entries = trees.finish();
     info!(
         "Pass 2 (bodies): {} commits, {} trees ({} entries), {} tags in {:?}",
-        commits_raw.len(),
-        tree_entries.len(),
-        tree_entries.entry_count(),
+        bodies.commits_raw.len(),
+        bodies.tree_entries.len(),
+        bodies.tree_entries.entry_count(),
         scan.container.tags.len(),
         start.elapsed()
     );
 
-    Ok(Bodies {
-        commits_raw,
-        tree_entries,
-        names,
-    })
+    Ok(bodies)
 }
 
-/// What the bodies give, before it goes into the container: commit headers,
-/// tree entries and their names, and each tag's index with its name and
-/// target
+/// What the bodies one worker reads give, before it goes into the
+/// container: commit headers, tree entries in read order with the worker's
+/// own names, and each tag's index with its name and target. Sized by what
+/// the worker reads, not by the repository.
+///
+/// One for each worker, not for each work unit: the entry arrays of a
+/// worker are a few large allocations. One set for each unit (1,735 on
+/// linux) made pass 2 peak 3.4 GB higher, because the unused capacity of
+/// medium allocations is resident.
+#[derive(Default)]
 struct Parsed {
-    commits_raw: HashMap<ObjectHash, CommitRaw>,
+    commits_raw: Vec<(ObjectHash, CommitRaw)>,
     trees: TreeEntriesBuilder,
     names: NameStore,
     tags: Vec<(usize, TagRaw)>,
 }
 
 impl Parsed {
-    fn new(commits: usize, trees: usize) -> Self {
-        Self {
-            commits_raw: HashMap::with_capacity(commits),
-            trees: TreeEntriesBuilder::new(trees),
-            names: NameStore::new(),
-            tags: Vec::new(),
-        }
-    }
-
     /// Parse the body of the object `id` with hash `hash`
     fn add(
         &mut self,
@@ -177,7 +172,7 @@ impl Parsed {
             ObjectId::Commit(i) => {
                 let raw =
                     parse_commit(body, i).with_context(|| format!("Bad commit {}", hex(hash)))?;
-                self.commits_raw.insert(*hash, raw);
+                self.commits_raw.push((*hash, raw));
             }
             ObjectId::Tree(i) => {
                 parse_tree(body, i, &mut self.names, index, &mut self.trees)
@@ -191,6 +186,46 @@ impl Parsed {
         }
         Ok(())
     }
+}
+
+/// The bodies of all workers, merged in the order of `parts`: their name
+/// stores in one store, and the tree entries of `trees` trees in tree
+/// index order with their names mapped to it. Also returns the tag records.
+fn merge(
+    parts: Vec<Parsed>,
+    commits: usize,
+    trees: usize,
+) -> Result<(Bodies, Vec<(usize, TagRaw)>)> {
+    let start = Instant::now();
+    let count = parts.len();
+    let mut names = NameStore::new();
+    let mut commits_raw = HashMap::with_capacity(commits);
+    let mut builders = Vec::with_capacity(count);
+    let mut maps = Vec::with_capacity(count);
+    let mut tags = Vec::new();
+    for part in parts {
+        maps.push(names.merge(&part.names)?);
+        commits_raw.extend(part.commits_raw);
+        builders.push(part.trees);
+        tags.extend(part.tags);
+    }
+    let entries_start = Instant::now();
+    let tree_entries = TreeEntries::merge(trees, builders.into_iter().zip(&maps).collect());
+    info!(
+        "Merged {} workers ({} names) in {:?}, tree entries in {:?}",
+        count,
+        names.len(),
+        start.elapsed(),
+        entries_start.elapsed()
+    );
+    Ok((
+        Bodies {
+            commits_raw,
+            tree_entries,
+            names,
+        },
+        tags,
+    ))
 }
 
 /// The delta cache counts of a pack: summed over its work units, with the

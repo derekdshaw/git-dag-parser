@@ -1,6 +1,6 @@
 use hashbrown::HashMap;
 
-use super::name_store::NameId;
+use super::name_store::{NameId, NameMap};
 use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, Tag, Tree};
 
 /// Hash type alias for Git object hashes (20 bytes for SHA-1)
@@ -311,35 +311,32 @@ impl TreeEntries {
     }
 }
 
-/// Builds a `TreeEntries`. Trees can be recorded in any order, since pass 2
-/// reads them pack by pack in offset order; `finish` lays the entries out
-/// in tree index order. A tree that is never recorded has no entries.
-#[derive(Debug)]
+/// Records the entries of the trees one worker reads, in the order it
+/// reads them, with names from the worker's own `NameStore`.
+/// `TreeEntries::merge` lays the entries of all workers out in tree index
+/// order. A tree that is never recorded has no entries.
+#[derive(Debug, Default)]
 pub struct TreeEntriesBuilder {
-    /// Entries in the order they were recorded; `finish` reorders them
+    /// Entries in the order they were recorded; the merge reorders them
     child: Vec<u32>,
     name: Vec<NameId>,
     mode: Vec<u8>,
-    /// Each tree's entries in the arrival arrays: (first position, count)
-    span: Vec<(u64, u32)>,
+    /// Each recorded tree with its entries in the arrays: (tree, first
+    /// position, count). Only the trees this builder records, so that a
+    /// builder for a few trees stays small.
+    spans: Vec<(u32, u64, u32)>,
     /// The tree entries are currently recorded for, with its first position
     open: Option<(usize, u64)>,
 }
 
 impl TreeEntriesBuilder {
-    /// A builder for the entries of `trees` trees
-    pub fn new(trees: usize) -> Self {
-        Self {
-            child: Vec::new(),
-            name: Vec::new(),
-            mode: Vec::new(),
-            span: vec![(0, 0); trees],
-            open: None,
-        }
+    /// An empty builder
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Start recording the entries of `tree`: pushes until the next
-    /// `begin_tree` or `finish` belong to it.
+    /// `begin_tree` or the merge belong to it.
     pub fn begin_tree(&mut self, tree: usize) {
         self.close();
         self.open = Some((tree, self.child.len() as u64));
@@ -360,27 +357,68 @@ impl TreeEntriesBuilder {
     fn close(&mut self) {
         if let Some((tree, begin)) = self.open.take() {
             let count = self.child.len() as u64 - begin;
-            self.span[tree] = (
+            self.spans.push((
+                u32::try_from(tree).expect("tree index fits in u32"),
                 begin,
                 u32::try_from(count).expect("tree entry count fits in u32"),
-            );
+            ));
         }
     }
+}
 
-    /// Lay the entries out in tree index order. The arrays are reordered
-    /// one at a time, each source freed right after, to limit peak memory.
-    pub fn finish(mut self) -> TreeEntries {
-        self.close();
-        let mut start = Vec::with_capacity(self.span.len() + 1);
+impl TreeEntries {
+    /// The entries of `trees` trees from the builders of all workers, in
+    /// tree index order. Each builder comes with the map of its worker's
+    /// name ids to the ids of the merged `NameStore`; the names are mapped
+    /// in the same pass that reorders them. Each tree must be recorded by
+    /// one builder at most.
+    ///
+    /// The arrays are gathered one at a time, and the builders' copy of
+    /// each is freed right after, so the peak is the entries and one more
+    /// array.
+    pub fn merge(trees: usize, parts: Vec<(TreeEntriesBuilder, &NameMap)>) -> TreeEntries {
+        let (mut builders, maps): (Vec<_>, Vec<_>) = parts.into_iter().unzip();
+        // The builder of each tree and its span there; trees that are never
+        // recorded keep a count of 0
+        let mut spans = vec![(0u32, 0u64, 0u32); trees];
+        for (b, builder) in builders.iter_mut().enumerate() {
+            builder.close();
+            for (tree, begin, count) in std::mem::take(&mut builder.spans) {
+                debug_assert_eq!(spans[tree as usize].2, 0, "tree {tree} recorded twice");
+                spans[tree as usize] = (b as u32, begin, count);
+            }
+        }
+        let mut start = Vec::with_capacity(trees + 1);
         let mut total = 0u64;
         start.push(0);
-        for &(_, count) in &self.span {
+        for &(_, _, count) in &spans {
             total += u64::from(count);
             start.push(total);
         }
-        let child = reorder(&self.span, std::mem::take(&mut self.child));
-        let name = reorder(&self.span, std::mem::take(&mut self.name));
-        let mode = reorder(&self.span, std::mem::take(&mut self.mode));
+        let child = gather(
+            &spans,
+            builders
+                .iter_mut()
+                .map(|b| std::mem::take(&mut b.child))
+                .collect(),
+            |out, _, c| out.extend_from_slice(c),
+        );
+        let name = gather(
+            &spans,
+            builders
+                .iter_mut()
+                .map(|b| std::mem::take(&mut b.name))
+                .collect(),
+            |out, b, n| maps[b].extend(out, n),
+        );
+        let mode = gather(
+            &spans,
+            builders
+                .iter_mut()
+                .map(|b| std::mem::take(&mut b.mode))
+                .collect(),
+            |out, _, m| out.extend_from_slice(m),
+        );
         TreeEntries {
             start,
             child,
@@ -390,13 +428,27 @@ impl TreeEntriesBuilder {
     }
 }
 
-/// The elements of `source` picked out span by span, dropping `source`
-fn reorder<T: Copy>(spans: &[(u64, u32)], source: Vec<T>) -> Vec<T> {
-    let total: usize = spans.iter().map(|&(_, count)| count as usize).sum();
+/// The elements of `sources` picked out span by span, dropping `sources`.
+/// `copy` appends the elements of one span, with the index of its source.
+fn gather<T: Copy>(
+    spans: &[(u32, u64, u32)],
+    sources: Vec<Vec<T>>,
+    mut copy: impl FnMut(&mut Vec<T>, usize, &[T]),
+) -> Vec<T> {
+    let total: usize = spans.iter().map(|&(_, _, count)| count as usize).sum();
     let mut out = Vec::with_capacity(total);
-    for &(begin, count) in spans {
+    for &(source, begin, count) in spans {
+        // A tree that was never recorded has no source
+        if count == 0 {
+            continue;
+        }
+        let source = source as usize;
         let begin = begin as usize;
-        out.extend_from_slice(&source[begin..begin + count as usize]);
+        copy(
+            &mut out,
+            source,
+            &sources[source][begin..begin + count as usize],
+        );
     }
     out
 }
@@ -404,6 +456,7 @@ fn reorder<T: Copy>(spans: &[(u64, u32)], source: Vec<T>) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::NameStore;
 
     #[test]
     fn hash_index_contains_finds_any_type() {
@@ -447,13 +500,33 @@ mod tests {
     }
 
     /// Intern `name` in `store`
-    fn name(store: &mut crate::models::NameStore, name: &[u8]) -> NameId {
+    fn name(store: &mut NameStore, name: &[u8]) -> NameId {
         store.intern(name).unwrap()
+    }
+
+    /// The entries of one builder whose name ids need no change
+    fn merge_one(trees: usize, builder: TreeEntriesBuilder, names: &NameStore) -> TreeEntries {
+        TreeEntries::merge(trees, vec![(builder, &NameMap::identity(names.len()))])
+    }
+
+    /// An entry as (child, name bytes, kind)
+    type Resolved = (Option<usize>, Vec<u8>, FileKind);
+
+    /// Each tree's entries with their names as bytes
+    fn resolved(entries: &TreeEntries, names: &NameStore) -> Vec<Vec<Resolved>> {
+        (0..entries.len())
+            .map(|t| {
+                entries
+                    .entries(t)
+                    .map(|(child, name, kind)| (child, names.get(name).to_vec(), kind))
+                    .collect()
+            })
+            .collect()
     }
 
     #[test]
     fn tree_entries_lays_trees_out_in_index_order() {
-        let mut names = crate::models::NameStore::new();
+        let mut names = NameStore::new();
         let (a, b, c) = (
             name(&mut names, b"a"),
             name(&mut names, b"b"),
@@ -461,14 +534,14 @@ mod tests {
         );
 
         // Recorded out of index order, as pass 2 does
-        let mut builder = TreeEntriesBuilder::new(3);
+        let mut builder = TreeEntriesBuilder::new();
         builder.begin_tree(2);
         builder.push(Some(7), c, FileKind::Symlink);
         builder.begin_tree(0);
         builder.push(Some(1), a, FileKind::Tree);
         builder.push(Some(5), b, FileKind::Executable);
         builder.begin_tree(1);
-        let entries = builder.finish();
+        let entries = merge_one(3, builder, &names);
 
         assert_eq!(entries.len(), 3);
         assert_eq!(entries.entry_count(), 3);
@@ -488,13 +561,13 @@ mod tests {
 
     #[test]
     fn tree_entries_childless_entry_has_no_child() {
-        let mut names = crate::models::NameStore::new();
+        let mut names = NameStore::new();
         let n = name(&mut names, b"sub");
 
-        let mut builder = TreeEntriesBuilder::new(1);
+        let mut builder = TreeEntriesBuilder::new();
         builder.begin_tree(0);
         builder.push(None, n, FileKind::Submodule);
-        let entries = builder.finish();
+        let entries = merge_one(1, builder, &names);
 
         assert_eq!(
             entries.entries(0).collect::<Vec<_>>(),
@@ -504,12 +577,67 @@ mod tests {
 
     #[test]
     fn tree_entries_never_recorded_tree_is_empty() {
-        let entries = TreeEntriesBuilder::new(2).finish();
+        let entries = TreeEntries::merge(2, Vec::new());
         assert_eq!(entries.len(), 2);
         assert!(!entries.is_empty());
         assert_eq!(entries.entry_count(), 0);
         assert_eq!(entries.entries(0).count(), 0);
         assert_eq!(entries.entries(1).count(), 0);
+    }
+
+    /// Record tree `tree` with entries of (child, name, kind) in `builder`,
+    /// interning the names in `names`
+    fn record(
+        builder: &mut TreeEntriesBuilder,
+        names: &mut NameStore,
+        tree: usize,
+        entries: &[(Option<usize>, &[u8], FileKind)],
+    ) {
+        builder.begin_tree(tree);
+        for &(child, n, kind) in entries {
+            let id = name(names, n);
+            builder.push(child, id, kind);
+        }
+    }
+
+    #[test]
+    fn tree_entries_merge_of_two_workers_equals_one_worker() {
+        use FileKind::{Executable, Regular, Tree};
+        let t0: &[(Option<usize>, &[u8], FileKind)] =
+            &[(Some(1), b"src", Tree), (Some(4), b"README", Regular)];
+        let t2: &[(Option<usize>, &[u8], FileKind)] = &[(Some(9), b"build.sh", Executable)];
+        let t3: &[(Option<usize>, &[u8], FileKind)] =
+            &[(Some(5), b"README", Regular), (None, b"lib", Tree)];
+        let t4: &[(Option<usize>, &[u8], FileKind)] = &[];
+        // Tree 1 is never recorded
+
+        let mut one = TreeEntriesBuilder::new();
+        let mut one_names = NameStore::new();
+        for (tree, entries) in [(3, t3), (0, t0), (4, t4), (2, t2)] {
+            record(&mut one, &mut one_names, tree, entries);
+        }
+        let want = resolved(&merge_one(5, one, &one_names), &one_names);
+
+        // The same trees from two workers, each with its own names, interned
+        // in another order. Worker a records its trees in two builders that
+        // share its names.
+        let mut a_names = NameStore::new();
+        let mut a1 = TreeEntriesBuilder::new();
+        record(&mut a1, &mut a_names, 2, t2);
+        let mut a2 = TreeEntriesBuilder::new();
+        record(&mut a2, &mut a_names, 3, t3);
+        let (mut b, mut b_names) = (TreeEntriesBuilder::new(), NameStore::new());
+        record(&mut b, &mut b_names, 4, t4);
+        record(&mut b, &mut b_names, 0, t0);
+        let mut names = NameStore::new();
+        let a_map = names.merge(&a_names).unwrap();
+        let b_map = names.merge(&b_names).unwrap();
+        let entries = TreeEntries::merge(5, vec![(a1, &a_map), (b, &b_map), (a2, &a_map)]);
+
+        assert_eq!(names.len(), 4, "src, README, build.sh, lib");
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries.entry_count(), 5);
+        assert_eq!(resolved(&entries, &names), want);
     }
 
     #[test]
