@@ -40,6 +40,9 @@ intaglio = { version = "1.15", default-features = false, features = ["bytes"] }
 # CPU count
 num_cpus = "1.17"
 
+# Global allocator of the binary (src/main.rs)
+mimalloc = "0.1"
+
 # Benchmarks (`cargo bench --features bench`). A regular optional dependency,
 # not a dev-dependency: the benchmarks live in the library next to the code
 # they measure, and the library is not built in test mode for benches.
