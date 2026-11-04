@@ -5,7 +5,9 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use flate2::{Decompress, FlushDecompress, Status};
 
-use super::delta_cache::{pack_reads, request_times, DeltaCache, DeltaCacheStats, RequestTimes};
+use hashbrown::HashMap;
+
+use super::delta_cache::{request_times, DeltaCache, DeltaCacheStats, RequestTimes};
 use crate::error::ParseError;
 use crate::models::container::ObjectHash;
 use crate::models::{ObjectCopy, ObjectKind};
@@ -46,30 +48,38 @@ pub fn verify_pack_header(data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Inflates the entries of one pack that pass 2 reads, by position. A delta
-/// is applied to its base, which comes from the cache when it is there and
-/// is otherwise built from the pack. A built entry goes into the cache if
-/// it has a request still to come. Only the first build of a delta requests
-/// its base, as `count_requests` counts; a later build, after an eviction,
-/// fetches the base without a request, so the counts stay correct.
+/// Inflates the entries of one pack that pass 2 reads, by position: all the
+/// reads of a pack, or one work unit of them. A delta is applied to its
+/// base, which comes from the cache when it is there and is otherwise built
+/// from the pack. A built entry goes into the cache if it has a request
+/// still to come. Only the first build of a delta requests its base, as
+/// `count_requests` counts; a later build, after an eviction, fetches the
+/// base without a request, so the counts stay correct.
 pub struct PackReader<'a> {
     data: &'a [u8],
     index: &'a PackIndex,
     graph: &'a DeltaGraph,
     /// The part of `container.copies` for this pack
     copies: &'a [ObjectCopy],
-    /// Requests still to come for each position
-    requests: Vec<u32>,
-    /// With `times`, the time of each request: see `request_times`
-    time_start: Vec<u32>,
+    /// Each position that the reads request
+    slots: HashMap<u32, Slot>,
+    /// The time of each request: see `request_times`
     times: Vec<u32>,
-    /// True once a position has been built one time
-    built: Vec<bool>,
     cache: DeltaCache,
     /// The result of a read that is not cached
     out: Vec<u8>,
     /// One decoder for all entries, reset for each
     inflater: Decompress,
+}
+
+/// The requests of one position still to come
+struct Slot {
+    /// The times of its requests end at `times[end]`
+    end: u32,
+    /// Requests still to come
+    left: u32,
+    /// True once the position has been built one time
+    built: bool,
 }
 
 /// The bytes of an entry
@@ -81,30 +91,37 @@ enum Bytes {
 }
 
 impl<'a> PackReader<'a> {
-    /// A reader for a pack. `copies` is the part of `container.copies` for
-    /// the pack, so the copy at `copies[i]` is the entry at position `i`,
-    /// and `limit` is the byte limit of the delta cache.
+    /// A reader for `reads` of a pack, which must then be read in that
+    /// order. `copies` is the part of `container.copies` for the pack, so
+    /// the copy at `copies[i]` is the entry at position `i`, and `limit` is
+    /// the byte limit of the delta cache.
     pub fn new(
         data: &'a [u8],
         index: &'a PackIndex,
         graph: &'a DeltaGraph,
         copies: &'a [ObjectCopy],
+        reads: impl Iterator<Item = usize> + Clone,
         limit: u64,
     ) -> Self {
-        let RequestTimes {
-            requests,
-            time_start,
-            times,
-        } = request_times(graph, pack_reads(copies));
+        let RequestTimes { requests, times } = request_times(graph, reads);
+        let slots = requests
+            .into_iter()
+            .map(|(c, r)| {
+                let slot = Slot {
+                    end: r.end,
+                    left: r.count,
+                    built: false,
+                };
+                (c, slot)
+            })
+            .collect();
         Self {
             data,
             index,
             graph,
             copies,
-            requests,
-            time_start,
+            slots,
             times,
-            built: vec![false; copies.len()],
             cache: DeltaCache::new(limit),
             out: Vec::new(),
             inflater: Decompress::new(true),
@@ -133,24 +150,27 @@ impl<'a> PackReader<'a> {
     fn request(&mut self, c: usize, depth: usize) -> Result<Bytes> {
         if self.cache.get(c as u32).is_some() {
             self.cache.stats.hits += 1;
-            debug_assert!(self.requests[c] > 0, "count_requests counted too few");
-            self.requests[c] -= 1;
-            if self.requests[c] == 0 {
+            let slot = self.slot(c);
+            debug_assert!(slot.left > 0, "count_requests counted too few");
+            slot.left -= 1;
+            if slot.left == 0 {
                 // The last request: the entry leaves the cache without a copy
                 return Ok(Bytes::Owned(self.cache.take(c as u32).unwrap()));
             }
-            self.cache.set_next(c as u32, self.next(c));
+            let next = self.next(c);
+            self.cache.set_next(c as u32, next);
             return Ok(Bytes::Cached(c));
         }
-        let first = !self.built[c];
+        let first = !self.slot(c).built;
         if !first {
             // Evicted, bypassed or too large: built again
             self.cache.stats.misses += 1;
         }
         let bytes = self.build(c, first, depth)?;
-        self.built[c] = true;
-        debug_assert!(self.requests[c] > 0, "count_requests counted too few");
-        self.requests[c] -= 1;
+        let slot = self.slot(c);
+        slot.built = true;
+        debug_assert!(slot.left > 0, "count_requests counted too few");
+        slot.left -= 1;
         Ok(self.keep(c, bytes))
     }
 
@@ -168,8 +188,9 @@ impl<'a> PackReader<'a> {
 
     /// Cache the bytes of `c` if it has a request still to come
     fn keep(&mut self, c: usize, bytes: Vec<u8>) -> Bytes {
-        if self.requests[c] > 0 {
-            match self.cache.insert(c as u32, bytes, self.next(c)) {
+        if self.slot(c).left > 0 {
+            let next = self.next(c);
+            match self.cache.insert(c as u32, bytes, next) {
                 Ok(()) => Bytes::Cached(c),
                 Err(bytes) => Bytes::Owned(bytes),
             }
@@ -178,9 +199,18 @@ impl<'a> PackReader<'a> {
         }
     }
 
-    /// Time of the next request of `c`. Only when `requests[c] > 0`.
-    fn next(&self, c: usize) -> u32 {
-        self.times[(self.time_start[c + 1] - self.requests[c]) as usize]
+    /// The requests of `c`, a position that the reads request
+    fn slot(&mut self, c: usize) -> &mut Slot {
+        self.slots
+            .get_mut(&(c as u32))
+            .expect("the reads request this position")
+    }
+
+    /// Time of the next request of `c`. Only when a request is still to come.
+    fn next(&mut self, c: usize) -> u32 {
+        let slot = self.slot(c);
+        let at = slot.end - slot.left;
+        self.times[at as usize]
     }
 
     /// Inflate the entry at `c` and, for a delta, apply it to its base. The
@@ -854,6 +884,7 @@ mod tests {
 
     use super::*;
     use crate::models::{ObjectId, ObjectKind};
+    use crate::parser::delta_cache::pack_reads;
 
     fn zlib(data: &[u8]) -> Vec<u8> {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -1167,7 +1198,8 @@ mod tests {
             .collect();
         let position = |offset| entries.iter().position(|e| e.offset == offset).unwrap();
 
-        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
+        let mut reader =
+            PackReader::new(&data, &index, &graph, &copies, pack_reads(&copies), 1 << 20);
 
         assert_eq!(reader.read(position(o_base)).unwrap(), b"base tree");
         assert_eq!(reader.read(position(o_d1)).unwrap(), b"first delta result");
@@ -1243,7 +1275,14 @@ mod tests {
         let (graph, copies) = reader_inputs(&data, &index, &[false, true, true, true, true]);
 
         // Room for one entry
-        let mut reader = PackReader::new(&data, &index, &graph, &copies, TREE_LEN as u64);
+        let mut reader = PackReader::new(
+            &data,
+            &index,
+            &graph,
+            &copies,
+            pack_reads(&copies),
+            TREE_LEN as u64,
+        );
 
         // Building B caches A (next 3), then B (next 1) evicts A
         assert_eq!(reader.read(1).unwrap(), b);
@@ -1283,7 +1322,14 @@ mod tests {
         let (data, index) = pack.finish();
         let (graph, copies) = reader_inputs(&data, &index, &[false, true, true, true]);
 
-        let mut reader = PackReader::new(&data, &index, &graph, &copies, TREE_LEN as u64);
+        let mut reader = PackReader::new(
+            &data,
+            &index,
+            &graph,
+            &copies,
+            pack_reads(&copies),
+            TREE_LEN as u64,
+        );
 
         assert_eq!(reader.read(1).unwrap(), b);
         assert_eq!(reader.stats().bypassed, 1, "B, requested later than A");
@@ -1310,7 +1356,7 @@ mod tests {
         let (data, index) = pack.finish();
         let (graph, copies) = reader_inputs(&data, &index, &[true, true, true]);
 
-        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1);
+        let mut reader = PackReader::new(&data, &index, &graph, &copies, pack_reads(&copies), 1);
 
         assert_eq!(reader.read(0).unwrap(), a);
         assert_eq!(reader.read(1).unwrap(), b);
@@ -1335,7 +1381,8 @@ mod tests {
         let (data, index) = pack.finish();
         let (graph, copies) = reader_inputs(&data, &index, &[true, true]);
 
-        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
+        let mut reader =
+            PackReader::new(&data, &index, &graph, &copies, pack_reads(&copies), 1 << 20);
 
         assert_eq!(reader.read(0).unwrap(), a);
         assert_eq!(reader.stats().left, 1, "A waits for B");
@@ -1359,7 +1406,8 @@ mod tests {
         let primary = vec![true; depth + 1];
         let (graph, copies) = reader_inputs(&data, &index, &primary);
 
-        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
+        let mut reader =
+            PackReader::new(&data, &index, &graph, &copies, pack_reads(&copies), 1 << 20);
 
         let err = reader.read(depth).unwrap_err().to_string();
         assert!(err.contains("too deep"), "unexpected error: {err}");
@@ -1379,7 +1427,8 @@ mod tests {
         let (graph, copies) = reader_inputs(&data, &index, &[true, true]);
         assert_eq!(graph.base(0), Some(1), "the base comes after the delta");
 
-        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
+        let mut reader =
+            PackReader::new(&data, &index, &graph, &copies, pack_reads(&copies), 1 << 20);
 
         assert_eq!(reader.read(0).unwrap(), r);
         assert_eq!(reader.stats().left, 1, "A waits for its read");
@@ -1389,6 +1438,58 @@ mod tests {
         assert_eq!(stats.hits, 1, "A for its read");
         assert_eq!(stats.misses, 0);
         assert_eq!(stats.left, 0);
+    }
+
+    #[test]
+    fn pack_reader_reads_each_work_unit_on_its_own() {
+        // Two families: a, with deltas on it and on its deltas, and e, with
+        // a REF delta that comes before it
+        let a = tree(0);
+        let b = shifted(&a, b"+b");
+        let mut pack = PackBuilder::new();
+        let o_a = pack.add([1; 20], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
+        pack.add_ofs_delta([3; 20], o_a, b"small, on a");
+        let o_c = pack.add_ofs_shift([4; 20], o_b, &b, b"+c");
+        pack.add_ref_delta([5; 20], [8; 20], b"ref delta on the later e");
+        pack.add_ofs_delta([6; 20], o_c, &[b'x'; 300]);
+        pack.add_ofs_delta([7; 20], o_b, b"another on b");
+        pack.add([8; 20], OBJ_TREE, b"e, a whole tree that comes late");
+        pack.add_ofs_delta([9; 20], o_a, &[b'y'; 200]);
+        let (data, index) = pack.finish();
+        let primary = [true, false, true, true, true, true, false, true, true];
+        let (graph, copies) = reader_inputs(&data, &index, &primary);
+
+        let mut whole =
+            PackReader::new(&data, &index, &graph, &copies, pack_reads(&copies), 1 << 20);
+        let expected: Vec<(usize, Vec<u8>)> = pack_reads(&copies)
+            .map(|pos| (pos, whole.read(pos).unwrap().to_vec()))
+            .collect();
+
+        let units = crate::parser::work::work_units(&graph, pack_reads(&copies), 1);
+        assert_eq!(units, vec![vec![0, 2, 3, 5, 8], vec![4, 7]]);
+        let mut got = Vec::new();
+        for unit in &units {
+            let reads = unit.iter().map(|&p| p as usize);
+            let mut reader =
+                PackReader::new(&data, &index, &graph, &copies, reads.clone(), 1 << 20);
+            for pos in reads {
+                got.push((pos, reader.read(pos).unwrap().to_vec()));
+            }
+            // A family needs no base from another unit
+            let stats = reader.stats();
+            assert_eq!(stats.misses, 0);
+            assert_eq!(stats.left, 0);
+        }
+        got.sort();
+        assert_eq!(got, expected);
+
+        // A unit keeps only the positions that it requests
+        let e = units[1].iter().map(|&p| p as usize);
+        let reader = PackReader::new(&data, &index, &graph, &copies, e, 1 << 20);
+        let mut slots: Vec<u32> = reader.slots.keys().copied().collect();
+        slots.sort_unstable();
+        assert_eq!(slots, vec![4, 7]);
     }
 
     #[test]
@@ -1421,7 +1522,8 @@ mod tests {
         .unwrap();
         assert!(sim.peak_entries > 1, "the fixture exercises the cache");
 
-        let mut reader = PackReader::new(&data, &index, &graph, &copies, 1 << 20);
+        let mut reader =
+            PackReader::new(&data, &index, &graph, &copies, pack_reads(&copies), 1 << 20);
         for pos in crate::parser::delta_cache::pack_reads(&copies) {
             let body = reader.read(pos).unwrap();
             if pos == 3 {

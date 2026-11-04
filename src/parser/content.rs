@@ -202,7 +202,7 @@ pub(crate) mod benches {
         let index = blob_index(&[&body]);
         bencher
             .counter(BytesCount::of_slice(&body))
-            .with_inputs(|| (NameStore::new(), TreeEntriesBuilder::new(1)))
+            .with_inputs(|| (NameStore::new(), TreeEntriesBuilder::new()))
             .bench_local_refs(|(names, out)| {
                 super::parse_tree(black_box(&body), 0, names, &index, out).unwrap()
             });
@@ -222,17 +222,10 @@ pub(crate) mod benches {
         for i in 0..100_000 {
             names.intern(format!("other_{i:06}.rs").as_bytes()).unwrap();
         }
-        super::parse_tree(
-            &body,
-            0,
-            &mut names,
-            &index,
-            &mut TreeEntriesBuilder::new(1),
-        )
-        .unwrap();
+        super::parse_tree(&body, 0, &mut names, &index, &mut TreeEntriesBuilder::new()).unwrap();
         bencher
             .counter(BytesCount::of_slice(&body))
-            .with_inputs(|| TreeEntriesBuilder::new(1))
+            .with_inputs(TreeEntriesBuilder::new)
             .bench_local_refs(|out| {
                 super::parse_tree(black_box(&body), 0, &mut names, &index, out).unwrap()
             });
@@ -270,7 +263,7 @@ pub(crate) mod benches {
             })
             .collect();
         let mut names = NameStore::new();
-        let mut warm = TreeEntriesBuilder::new(DIRS);
+        let mut warm = TreeEntriesBuilder::new();
         for (dir, body) in bodies.iter().enumerate() {
             super::parse_tree(body, dir, &mut names, &index, &mut warm).unwrap();
         }
@@ -278,7 +271,7 @@ pub(crate) mod benches {
             .counter(BytesCount::new(
                 order.iter().map(|(_, b)| b.len()).sum::<usize>(),
             ))
-            .with_inputs(|| TreeEntriesBuilder::new(DIRS))
+            .with_inputs(TreeEntriesBuilder::new)
             .bench_local_refs(|out| {
                 for &(dir, body) in &order {
                     super::parse_tree(black_box(body), dir, &mut names, &index, out).unwrap();
@@ -302,7 +295,13 @@ pub(crate) mod benches {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ObjectId;
+    use crate::models::container::TreeEntries;
+    use crate::models::{NameMap, ObjectId};
+
+    /// The entries of `trees` trees recorded in `out`, with the ids of `names`
+    fn finish(out: TreeEntriesBuilder, names: &NameStore, trees: usize) -> TreeEntries {
+        TreeEntries::merge(trees, vec![(out, &NameMap::identity(names.len()))])
+    }
 
     const TREE_HEX: &[u8] = b"4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     const PARENT1_HEX: &[u8] = b"0123456789abcdef0123456789abcdef01234567";
@@ -388,9 +387,9 @@ mod tests {
         index.insert(blob_hash, ObjectId::Blob(4));
         index.insert(tree_hash, ObjectId::Tree(2));
         let mut names = NameStore::new();
-        let mut out = TreeEntriesBuilder::new(1);
+        let mut out = TreeEntriesBuilder::new();
         parse_tree(&body, 0, &mut names, &index, &mut out).unwrap();
-        let entries = out.finish();
+        let entries = finish(out, &names, 1);
 
         let parsed: Vec<_> = entries.entries(0).collect();
         assert_eq!(parsed.len(), 2);
@@ -416,9 +415,9 @@ mod tests {
         let mut index = HashIndex::new();
         index.insert(submodule_hash, ObjectId::Commit(0));
         let mut names = NameStore::new();
-        let mut out = TreeEntriesBuilder::new(1);
+        let mut out = TreeEntriesBuilder::new();
         parse_tree(&body, 0, &mut names, &index, &mut out).unwrap();
-        let entries = out.finish();
+        let entries = finish(out, &names, 1);
 
         let kinds: Vec<_> = entries
             .entries(0)
@@ -439,11 +438,11 @@ mod tests {
         body.extend_from_slice(&[2; 20]);
         let index = HashIndex::new();
         let mut names = NameStore::new();
-        let mut out = TreeEntriesBuilder::new(2);
+        let mut out = TreeEntriesBuilder::new();
 
         parse_tree(&body, 0, &mut names, &index, &mut out).unwrap();
         parse_tree(&body, 1, &mut names, &index, &mut out).unwrap();
-        let entries = out.finish();
+        let entries = finish(out, &names, 2);
 
         let first: Vec<_> = entries.entries(0).map(|(_, name, _)| name).collect();
         let second: Vec<_> = entries.entries(1).map(|(_, name, _)| name).collect();

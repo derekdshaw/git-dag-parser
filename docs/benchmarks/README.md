@@ -50,7 +50,7 @@ File names are `<UTC time>-<commit>[-dirty][-<label>]`. `dirty` means the workin
 How to read a comparison:
 
 - Only compare runs from the same computer. The header of each file records the CPU model, the CPU count, and the kernel.
-- Allocation counts and bytes do not change between runs of the same code. Compare them exactly.
+- Allocation counts and bytes do not change between runs of the same code. Compare them exactly. The exception is `parse_objects_repo` from the run `parallel-pass-2` on: divan counts only the thread that runs the benchmark, and pass 2 allocates on worker threads. Its counts are too low and can change between runs. For the memory of a parse, use the harness (below).
 - Times vary between runs of the same code. Most medians stay within 5%, but some move by 10–35% (`parse_tree_*`, `delta_result_size_1000`, `apply_delta/65536`, `record_and_finish`). Run each side more than once before you trust a time change, and confirm end-to-end changes with instruction counts from `hyperfine` (below).
 
 ## Repositories
@@ -101,6 +101,11 @@ These scripts measure the release binary on real repositories:
 - `scripts/benchmarks/harness.py` runs `git-dag-parser init` once. It records wall time, CPU time, and page faults (from `/usr/bin/time -v`), samples the heap (`RssAnon`) every 0.2 s, reads the pass 1 and pass 2 timings from the info logs and the `Parse:` and `Total:` timings from the stdout summary, and stops the run above a heap limit or a time limit.
   ```
   python3 scripts/benchmarks/harness.py <label> <repo> <out.json> --bin target/release/git-dag-parser --limit-gb 48
+  ```
+  The harness gives the program only the `RUST_LOG` and `PATH` environment variables. To set a different number of pass 2 threads, give `--bin` a script that sets `RAYON_NUM_THREADS` and starts the program with `exec`. `exec` keeps the process ID, so the harness still samples the program:
+  ```
+  #!/bin/sh
+  exec env RAYON_NUM_THREADS=8 /path/to/git-dag-parser "$@"
   ```
 - `hyperfine` 2.0 gives repeated timings and hardware counters. Instruction counts usually change by about 0.01% between runs (up to 0.15%), so they show the effect of a code change better than time does:
   ```

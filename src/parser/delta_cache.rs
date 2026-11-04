@@ -7,7 +7,7 @@
 use std::collections::BinaryHeap;
 
 use anyhow::{anyhow, Result};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 
 use super::pack::{DeltaGraph, MAX_DELTA_DEPTH};
 use crate::models::{ObjectCopy, ObjectKind};
@@ -26,19 +26,20 @@ pub fn pack_reads(copies: &[ObjectCopy]) -> impl Iterator<Item = usize> + Clone 
 /// Call `f(c, p)` for each request: `c` is the requested entry, and `p` is
 /// the read that makes the request. A read requests its entry, and the
 /// first build of an entry requests its base. In one read an entry gets at
-/// most one request.
+/// most one request. `first_build(c)` marks `c` as built and is true only
+/// the first time, so that a pack-wide array or a map for a unit can keep
+/// the marks.
 fn for_each_request(
     graph: &DeltaGraph,
     reads: impl Iterator<Item = usize>,
+    mut first_build: impl FnMut(usize) -> bool,
     mut f: impl FnMut(usize, usize),
 ) {
-    let mut needed = vec![false; graph.len()];
     for p in reads {
         f(p, p);
         let mut c = p;
         // Only the first build of an entry requests its base
-        while !needed[c] {
-            needed[c] = true;
+        while first_build(c) {
             match graph.base(c) {
                 None => break,
                 Some(b) => {
@@ -54,53 +55,78 @@ fn for_each_request(
 /// base of each entry for its first build
 pub fn count_requests(graph: &DeltaGraph, reads: impl Iterator<Item = usize>) -> Vec<u32> {
     let mut requests = vec![0u32; graph.len()];
-    for_each_request(graph, reads, |c, _| requests[c] += 1);
+    let mut built = vec![false; graph.len()];
+    for_each_request(
+        graph,
+        reads,
+        |c| !std::mem::replace(&mut built[c], true),
+        |c, _| requests[c] += 1,
+    );
     requests
 }
 
-/// The requests for each position and their times. The time of a request
+/// The requests of one position: see `RequestTimes`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Requests {
+    /// The times of the requests are `times[end - count..end]`
+    pub end: u32,
+    pub count: u32,
+}
+
+/// The requests of a set of reads and their times. The time of a request
 /// is the read position `p` that makes it, so the times of a position are
-/// in ascending order and no two are equal.
+/// in ascending order and no two are equal. Only the positions that the
+/// reads request are in `requests`, so a work unit does not need arrays as
+/// large as its pack.
 pub struct RequestTimes {
-    /// Number of requests for each position (the result of `count_requests`)
-    pub requests: Vec<u32>,
-    /// The times of position `c` are `times[time_start[c]..time_start[c + 1]]`
-    pub time_start: Vec<u32>,
+    pub requests: HashMap<u32, Requests>,
     pub times: Vec<u32>,
 }
 
 /// The requests and their times, in two passes over `reads`: the first
-/// counts, the second writes the times. When `requests[c]` requests of `c`
-/// are still to come, the next one is `times[time_start[c + 1] - requests[c]]`.
+/// counts, the second writes the times. When `left` requests of `c` are
+/// still to come, the next one is `times[end - left]`.
 pub fn request_times(
     graph: &DeltaGraph,
     reads: impl Iterator<Item = usize> + Clone,
 ) -> RequestTimes {
-    let n = graph.len();
-    let requests = count_requests(graph, reads.clone());
+    let mut requests: HashMap<u32, Requests> = HashMap::new();
+    let mut built: HashSet<u32> = HashSet::new();
+    for_each_request(
+        graph,
+        reads.clone(),
+        |c| built.insert(c as u32),
+        |c, _| {
+            requests
+                .entry(c as u32)
+                .or_insert(Requests { end: 0, count: 0 })
+                .count += 1
+        },
+    );
 
-    let mut time_start = vec![0u32; n + 1];
+    // Lay the times of each position out one after the other. While the
+    // times are written, `end` is where the next one goes.
     let mut total = 0u64;
-    for c in 0..n {
-        total += u64::from(requests[c]);
-        // At most two requests for each entry: its read and one first build
-        time_start[c + 1] = u32::try_from(total).expect("request count fits in u32");
+    for r in requests.values_mut() {
+        r.end = u32::try_from(total).expect("request count fits in u32");
+        total += u64::from(r.count);
     }
+    let mut times = vec![0u32; total as usize];
+    built.clear();
+    for_each_request(
+        graph,
+        reads,
+        |c| built.insert(c as u32),
+        |c, p| {
+            let r = requests
+                .get_mut(&(c as u32))
+                .expect("counted in the first pass");
+            times[r.end as usize] = u32::try_from(p).expect("read position fits in u32");
+            r.end += 1;
+        },
+    );
 
-    let mut times = vec![0u32; time_start[n] as usize];
-    let mut written = vec![0u32; n];
-    for_each_request(graph, reads, |c, p| {
-        times[(time_start[c] + written[c]) as usize] =
-            u32::try_from(p).expect("read position fits in u32");
-        written[c] += 1;
-    });
-    debug_assert_eq!(written, requests);
-
-    RequestTimes {
-        requests,
-        time_start,
-        times,
-    }
+    RequestTimes { requests, times }
 }
 
 /// The result of `simulate_cache` for one pack
@@ -209,6 +235,22 @@ pub struct DeltaCacheStats {
     pub peak_entries: usize,
     /// Entries in the cache now
     pub left: usize,
+}
+
+impl DeltaCacheStats {
+    /// Add the counts of another cache, such as another unit of the same
+    /// pack. The peaks are the larger of the two: the units of one worker
+    /// do not hold entries at the same time.
+    pub fn add(&mut self, other: &DeltaCacheStats) {
+        self.hits += other.hits;
+        self.misses += other.misses;
+        self.evictions += other.evictions;
+        self.too_large += other.too_large;
+        self.bypassed += other.bypassed;
+        self.peak_bytes = self.peak_bytes.max(other.peak_bytes);
+        self.peak_entries = self.peak_entries.max(other.peak_entries);
+        self.left += other.left;
+    }
 }
 
 /// The resolved entries of one pack that pass 2 needs again, by position,
@@ -660,19 +702,68 @@ mod tests {
     /// result of `count_requests` and gives the number of times.
     fn times(bases: &[u32], reads: &[usize]) -> Vec<Vec<u32>> {
         let graph = DeltaGraph::from_bases(bases.to_vec());
-        let RequestTimes {
-            requests,
-            time_start,
-            times,
-        } = request_times(&graph, reads.iter().copied());
-        assert_eq!(requests, count_requests(&graph, reads.iter().copied()));
+        let RequestTimes { requests, times } = request_times(&graph, reads.iter().copied());
+        let counts = count_requests(&graph, reads.iter().copied());
         (0..graph.len())
-            .map(|c| {
-                let own = times[time_start[c] as usize..time_start[c + 1] as usize].to_vec();
-                assert_eq!(own.len(), requests[c] as usize, "position {c}");
-                own
+            .map(|c| match requests.get(&(c as u32)) {
+                Some(r) => {
+                    assert_eq!(r.count, counts[c], "position {c}");
+                    times[(r.end - r.count) as usize..r.end as usize].to_vec()
+                }
+                None => {
+                    assert_eq!(counts[c], 0, "position {c} is requested");
+                    Vec::new()
+                }
             })
             .collect()
+    }
+
+    #[test]
+    fn request_times_keep_only_the_positions_that_are_requested() {
+        // A, B ← C, and a read of C only: A is not requested
+        let RequestTimes { requests, times } =
+            request_times(&DeltaGraph::from_bases(vec![NO, NO, 1]), [C].into_iter());
+        let mut keys: Vec<u32> = requests.keys().copied().collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec![B as u32, C as u32]);
+        assert_eq!(times.len(), 2);
+    }
+
+    #[test]
+    fn stats_add_sums_the_counts_and_keeps_the_larger_peaks() {
+        let mut a = DeltaCacheStats {
+            hits: 1,
+            misses: 2,
+            evictions: 3,
+            too_large: 4,
+            bypassed: 5,
+            peak_bytes: 100,
+            peak_entries: 7,
+            left: 0,
+        };
+        a.add(&DeltaCacheStats {
+            hits: 10,
+            misses: 20,
+            evictions: 30,
+            too_large: 40,
+            bypassed: 50,
+            peak_bytes: 60,
+            peak_entries: 9,
+            left: 1,
+        });
+        assert_eq!(
+            a,
+            DeltaCacheStats {
+                hits: 11,
+                misses: 22,
+                evictions: 33,
+                too_large: 44,
+                bypassed: 55,
+                peak_bytes: 100,
+                peak_entries: 9,
+                left: 1,
+            }
+        );
     }
 
     #[test]
