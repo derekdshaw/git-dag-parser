@@ -1173,6 +1173,66 @@ mod tests {
     }
 
     #[test]
+    fn scan_pack_on_8_threads_equals_scan_pack_on_1_thread() {
+        let mut pack = PackBuilder::new();
+        // Hashes are out of offset order. With chunks of 2 positions, the
+        // bases below are in the same chunk, an earlier one, or a later one.
+        let o0 = pack.add([40; 20], OBJ_BLOB, b"base blob");
+        let o1 = pack.add_ofs_delta([30; 20], o0, b"on the blob");
+        // Base in the earlier chunk
+        pack.add_ofs_delta([90; 20], o1, b"depth 2");
+        // Base in a later chunk, and that base is itself a delta
+        pack.add_ref_delta([10; 20], [60; 20], b"forward ref");
+        let o4 = pack.add([80; 20], OBJ_COMMIT, b"tree x\n");
+        pack.add_ofs_delta([20; 20], o4, b"on the commit");
+        pack.add_ofs_delta([60; 20], o4, b"the base of the forward ref");
+        // Base two chunks back
+        pack.add_ref_delta([70; 20], [40; 20], b"backward ref");
+        let o8 = pack.add([50; 20], OBJ_TREE, b"100644 f\0aaaaaaaaaaaaaaaaaaaa");
+        pack.add_ofs_delta([100; 20], o8, b"on the tree");
+        let (data, index) = pack.finish();
+
+        let scan_on = |threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| scan_pack(&data, &index).unwrap())
+        };
+        let bases = |graph: &DeltaGraph| -> Vec<Option<usize>> {
+            (0..graph.len()).map(|pos| graph.base(pos)).collect()
+        };
+
+        let (one, one_graph) = scan_on(1);
+        let (eight, eight_graph) = scan_on(8);
+
+        assert_eq!(eight, one);
+        assert_eq!(bases(&eight_graph), bases(&one_graph));
+
+        // The two scans could agree on a wrong result
+        let kinds: Vec<ObjectKind> = one.iter().map(|e| e.kind).collect();
+        let (b, c, t) = (ObjectKind::Blob, ObjectKind::Commit, ObjectKind::Tree);
+        assert_eq!(kinds, vec![b, b, b, c, c, c, c, b, t, t]);
+        assert_eq!(
+            bases(&one_graph),
+            vec![
+                None,
+                Some(0),
+                Some(1),
+                Some(6),
+                None,
+                Some(4),
+                Some(4),
+                Some(0),
+                None,
+                Some(8),
+            ]
+        );
+        let sizes: Vec<u64> = one.iter().map(|e| e.size).collect();
+        assert_eq!(sizes, vec![9, 11, 7, 11, 7, 13, 27, 12, 29, 11]);
+    }
+
+    #[test]
     fn pack_reader_inflates_whole_objects_and_resolves_delta_chains() {
         let mut pack = PackBuilder::new();
         let o_base = pack.add([1; 20], OBJ_TREE, b"base tree");
