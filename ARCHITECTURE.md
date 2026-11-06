@@ -7,7 +7,7 @@ The parser reads the Git object store directly. It does not start `git` processe
 1. Pass 1 reads only the object headers. It finds all objects, their types, their sizes, and all copies of each object on disk.
 2. Pass 2 reads the bodies of commits, trees, and tags. It does not read blob bodies.
 
-After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. Pass 2 uses more than one thread. The other steps use one thread.
+After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. Pass 2 and the header read of pass 1 use more than one thread. The other steps use one thread.
 
 For the meaning of terms such as work unit, worker, and delta family, refer to "Terms" in [README.md](README.md).
 
@@ -42,7 +42,8 @@ For the meaning of terms such as work unit, worker, and delta family, refer to "
  +---------------------------------------------------------------+
  | Pass 1: headers (scan.rs)                                     |
  |   read each pack index, open each pack file with mmap         |
- |   read the pack entry headers in offset sequence              |
+ |   read the pack entry headers, on more than one thread        |
+ |   find the object type of each entry, in offset sequence      |
  |   read the loose object headers                               |
  |   select the primary copy of each object                      |
  |   sort the objects of each type by hash                       |
@@ -78,11 +79,11 @@ Pass 1 (`scan_repository`) finds all pack files in `objects/pack/`. It uses only
 
 For each pack file, pass 1 reads the `.idx` file and opens the `.pack` file with `mmap`. The pack files stay open until `parse_objects` is complete. If a different process changes a pack file while the program parses the repository, the result is not correct and the program can stop.
 
-Pass 1 reads the header of each pack entry in offset sequence. Thus it reads each pack file one time, from the start to the end. A pack entry header gives the object type and the object size. Pass 1 does not decompress the object bodies.
+Pass 1 reads the header of each pack entry on the `rayon` thread pool, the same pool as pass 2. It cuts the entries, in offset sequence, into chunks of 4,096, and each task reads one chunk from the start to the end. The chunks do not depend on the number of threads. A pack entry header gives the object type and the object size. Pass 1 does not decompress the object bodies.
 
 A delta entry does not give the object type or the object size directly:
 
-- To find the object type, pass 1 follows the chain of delta bases to an entry that is not a delta. For an offset delta, the base is always at a lower offset. Thus pass 1 knows the type of the base before it reads the delta.
+- To find the object type, pass 1 uses the type of the base. The base can be in a different chunk. Thus pass 1 finds the types after it reads all headers, on one thread, in offset sequence. For an offset delta, the base is always at a lower offset, so its type is already known. A ref delta can have a base at a higher offset. Then pass 1 follows the chain of delta bases to an entry that is not a delta.
 - To find the object size, pass 1 decompresses only the first bytes of the delta. These bytes contain the size of the object that the delta makes.
 
 Then pass 1 reads the header of each loose object. A loose object is one zlib stream. Pass 1 decompresses only the start of the stream, which contains the header.
