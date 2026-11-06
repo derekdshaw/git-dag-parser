@@ -223,12 +223,7 @@ impl Scan {
             }
         }
 
-        let mut index = HashIndex::with_capacity(self.index.len());
-        index_all(&mut index, &c.commits, |o| o.hash, ObjectId::Commit);
-        index_all(&mut index, &c.trees, |o| o.hash, ObjectId::Tree);
-        index_all(&mut index, &c.blobs, |o| o.hash, ObjectId::Blob);
-        index_all(&mut index, &c.tags, |o| o.hash, ObjectId::Tag);
-        self.index = index;
+        self.index.renumber(renumber);
     }
 
     /// Position in `container.copies` of the object's primary copy
@@ -291,17 +286,6 @@ fn sort_by_hash<T>(
         *slot = pos;
     }
     new_index
-}
-
-fn index_all<T>(
-    index: &mut HashIndex,
-    objects: &[T],
-    hash: impl Fn(&T) -> ObjectHash,
-    id: impl Fn(usize) -> ObjectId,
-) {
-    for (i, object) in objects.iter().enumerate() {
-        index.insert(hash(object), id(i));
-    }
 }
 
 /// A pack held open across both passes
