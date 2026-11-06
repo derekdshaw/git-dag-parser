@@ -89,7 +89,7 @@ pub fn parse_objects_with(git_dir: &Path, options: &ParseOptions) -> Result<Pars
     Ok((commits_raw, tree_entries, names, hash_index, container))
 }
 
-/// The default number of pass 2 threads on a machine with `hardware`
+/// The default number of threads of pass 1 and 2 on a machine with `hardware`
 /// threads: a quarter of them, but up to 8 on a small machine, always
 /// keeping one free. On 128 threads, pass 2 is no faster past about 32, and
 /// each thread adds to the peak heap (about 15 MB on vscode).

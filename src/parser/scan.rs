@@ -1,10 +1,11 @@
 //! Pass 1 of parsing: find every pack and loose file, read object headers
 //! only, and decide which on-disk copy of each object is its primary.
 //!
-//! Packs are read in offset order so each is touched sequentially from
-//! front to back. While reading, an object gets a provisional index the
-//! first time its hash is seen. When the scan ends, each kind is sorted by
-//! hash, so the final index does not depend on how the objects are packed.
+//! The headers of a pack are read on the current rayon pool, and then each
+//! entry is recorded on one thread, in offset order. While recording, an
+//! object gets a provisional index the first time its hash is seen. When the
+//! scan ends, each kind is sorted by hash, so the final index does not depend
+//! on how the objects are packed.
 
 use std::cmp::Reverse;
 use std::fs;
@@ -416,12 +417,13 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
 
     let c = &scan.container;
     info!(
-        "Pass 1 (headers): C:{} T:{} B:{} t:{} from {} copies in {:?}",
+        "Pass 1 (headers): C:{} T:{} B:{} t:{} from {} copies on {} threads in {:?}",
         c.commits.len(),
         c.trees.len(),
         c.blobs.len(),
         c.tags.len(),
         c.copies.len(),
+        rayon::current_num_threads(),
         start.elapsed()
     );
 
