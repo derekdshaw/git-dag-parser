@@ -121,3 +121,5 @@ These scripts measure the release binary on real repositories:
   ```
 
 Hardware counters and `samply` need `kernel.perf_event_paranoid` at 1 or lower: `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid`.
+
+To compare a benchmark between two commits, run the two binaries in turn on one core: `taskset -c 8 <bench-binary> --bench --sample-count 200 --sample-size 10000 <name>`. Runs that are not on one core can hide a difference of 15%. If a benchmark changes but its code does not, compare the address of its loops in the two binaries: a small loop that moves across a 64-byte boundary can change the result by this much. To profile a benchmark on one core, put `taskset` after `samply record --`, not before `samply`, and give `hotspots.py` the name of the benchmark binary with `--thread-prefix`.
