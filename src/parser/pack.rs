@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use flate2::{Decompress, FlushDecompress, Status};
 
 use hashbrown::HashMap;
+use rayon::prelude::*;
 
 use super::delta_cache::{request_times, DeltaCache, DeltaCacheStats, RequestTimes};
 use crate::error::ParseError;
@@ -316,12 +317,31 @@ impl DeltaGraph {
     }
 }
 
-/// Read every entry's header in offset order, so the pack is touched
-/// sequentially from front to back. Nothing is inflated except the first
-/// few bytes of each delta, which hold the result size.
+/// Entries of a pack that one task of the header scan reads
+#[cfg(not(test))]
+const HEADER_CHUNK: usize = 4096;
+/// Small, so that the tests split their few entries into several tasks
+#[cfg(test)]
+const HEADER_CHUNK: usize = 2;
+
+/// What the header scan finds for one entry, before the kind of a delta is
+/// known
+#[derive(Clone, Copy, Default)]
+struct Head {
+    /// Inflated size of the object; for a delta, the size the delta produces
+    size: u64,
+    /// Position of the delta's base; `NO_BASE` for an entry that is not a delta
+    base: u32,
+    obj_type: u8,
+}
+
+/// Read every entry's header on the current rayon pool. Nothing is inflated
+/// except the first few bytes of each delta, which hold the result size. The
+/// entries and the graph do not depend on the number of threads.
 ///
-/// Scanning in offset order also means an OFS delta's base has always been
-/// seen already, so its kind is a lookup rather than a walk up the chain.
+/// The kinds come after the headers, on one thread and in offset order, since
+/// the kind of a delta comes from its base, which another task may read. An
+/// OFS delta's base is at a lower offset, so its kind is already known.
 /// The returned graph gives the position of each delta's base.
 pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<(Vec<ScannedEntry>, DeltaGraph)> {
     if pack_data.len() < 12 + 20 {
@@ -330,61 +350,92 @@ pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<(Vec<ScannedEntr
     let pack_end = (pack_data.len() - 20) as u64;
 
     let mut order: Vec<usize> = (0..index.entries.len()).collect();
-    order.sort_unstable_by_key(|&i| index.entries[i].offset);
+    order.par_sort_unstable_by_key(|&i| index.entries[i].offset);
     let offsets: Vec<u64> = order.iter().map(|&i| index.entries[i].offset).collect();
 
-    // Kind of each entry in `order`, filled as the scan proceeds
+    let heads = read_heads(pack_data, index, &offsets)?;
+
+    // Kind of each entry in `order`, filled as the loop proceeds
     let mut kinds: Vec<Option<ObjectKind>> = vec![None; order.len()];
     let mut entries = Vec::with_capacity(order.len());
-    let mut base = Vec::with_capacity(order.len());
-    let mut inflater = Decompress::new(true);
 
-    for (pos, &i) in order.iter().enumerate() {
+    for (pos, (&i, head)) in order.iter().zip(&heads).enumerate() {
         let entry = &index.entries[i];
-        let offset = entry.offset as usize;
-        let (obj_type, obj_size, header_len) = parse_object_header(&pack_data[offset..])?;
-        let data_start = offset + header_len;
-        let size_disk = offsets.get(pos + 1).copied().unwrap_or(pack_end) - entry.offset;
-
-        let (kind, size, is_delta) = match obj_type {
-            OBJ_OFS_DELTA | OBJ_REF_DELTA => {
-                let (base_offset, payload_start) =
-                    delta_base(pack_data, index, offset, obj_type, data_start)?;
-                // A base offset that is not the start of an entry means the
-                // pack is damaged
-                let p = offsets
-                    .binary_search(&(base_offset as u64))
-                    .map_err(|_| ParseError::DeltaBaseNotFound(base_offset as u64))?;
-                let kind = match kinds[p] {
-                    Some(kind) => kind,
-                    // A REF delta may point forward to a base not yet scanned
-                    None => pack_kind(resolved_type(pack_data, index, base_offset)?)?,
-                };
-                base.push(p as u32);
-                (
-                    kind,
-                    delta_result_size(&mut inflater, &pack_data[payload_start..])?,
-                    true,
-                )
+        let is_delta = head.base != DeltaGraph::NO_BASE;
+        let kind = if is_delta {
+            let base = head.base as usize;
+            match kinds[base] {
+                Some(kind) => kind,
+                // A REF delta may point forward to a base not yet reached
+                None => pack_kind(resolved_type(pack_data, index, offsets[base] as usize)?)?,
             }
-            _ => {
-                base.push(DeltaGraph::NO_BASE);
-                (pack_kind(obj_type)?, obj_size, false)
-            }
+        } else {
+            pack_kind(head.obj_type)?
         };
 
         kinds[pos] = Some(kind);
         entries.push(ScannedEntry {
             hash: entry.hash,
             offset: entry.offset,
-            size_disk,
+            size_disk: offsets.get(pos + 1).copied().unwrap_or(pack_end) - entry.offset,
             kind,
-            size,
+            size: head.size,
             is_delta,
         });
     }
 
+    let base = heads.iter().map(|head| head.base).collect();
     Ok((entries, DeltaGraph { base }))
+}
+
+/// The `Head` of each entry, by position in `offsets`. If more than one task
+/// fails, the error is from one of them.
+fn read_heads(pack_data: &[u8], index: &PackIndex, offsets: &[u64]) -> Result<Vec<Head>> {
+    let mut heads = vec![Head::default(); offsets.len()];
+    heads
+        .par_chunks_mut(HEADER_CHUNK)
+        .zip(offsets.par_chunks(HEADER_CHUNK))
+        .try_for_each_init(
+            || Decompress::new(true),
+            |inflater, (chunk_heads, chunk_offsets)| -> Result<()> {
+                for (head, &offset) in chunk_heads.iter_mut().zip(chunk_offsets) {
+                    *head = read_head(pack_data, index, offsets, offset as usize, inflater)?;
+                }
+                Ok(())
+            },
+        )?;
+    Ok(heads)
+}
+
+/// Read the header of the entry at `offset`. `offsets` is the offset of every
+/// entry of the pack, sorted.
+fn read_head(
+    pack_data: &[u8],
+    index: &PackIndex,
+    offsets: &[u64],
+    offset: usize,
+    inflater: &mut Decompress,
+) -> Result<Head> {
+    let (obj_type, obj_size, header_len) = parse_object_header(&pack_data[offset..])?;
+    if obj_type != OBJ_OFS_DELTA && obj_type != OBJ_REF_DELTA {
+        return Ok(Head {
+            size: obj_size,
+            base: DeltaGraph::NO_BASE,
+            obj_type,
+        });
+    }
+    let (base_offset, payload_start) =
+        delta_base(pack_data, index, offset, obj_type, offset + header_len)?;
+    // A base offset that is not the start of an entry means the pack is
+    // damaged
+    let base = offsets
+        .binary_search(&(base_offset as u64))
+        .map_err(|_| ParseError::DeltaBaseNotFound(base_offset as u64))?;
+    Ok(Head {
+        size: delta_result_size(inflater, &pack_data[payload_start..])?,
+        base: base as u32,
+        obj_type,
+    })
 }
 
 /// Kind for a non-delta pack type code
