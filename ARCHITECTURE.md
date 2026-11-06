@@ -7,7 +7,7 @@ The parser reads the Git object store directly. It does not start `git` processe
 1. Pass 1 reads only the object headers. It finds all objects, their types, their sizes, and all copies of each object on disk.
 2. Pass 2 reads the bodies of commits, trees, and tags. It does not read blob bodies.
 
-After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. Pass 2 and the header read of pass 1 use more than one thread. The other steps use one thread.
+After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. Pass 2, and the header read and the sorts by hash of pass 1, use more than one thread. The other steps use one thread.
 
 For the meaning of terms such as work unit, worker, and delta family, refer to "Terms" in [README.md](README.md).
 
@@ -46,7 +46,8 @@ For the meaning of terms such as work unit, worker, and delta family, refer to "
  |   find the object type of each entry, in offset sequence      |
  |   read the loose object headers                               |
  |   select the primary copy of each object                      |
- |   sort the objects of each type by hash                       |
+ |   sort the objects of each type by hash, on more than one     |
+ |   thread                                                      |
  +---------------------------------------------------------------+
                |  ObjectContainer, HashIndex, open pack files
                v
@@ -101,7 +102,7 @@ An object gets its `size_disk` from its primary copy. Pass 2 reads the body of a
 
 #### Object indices
 
-When pass 1 finds an object for the first time, it gives the object a temporary index. At the end of pass 1, `Scan::finish` sorts the objects of each type by hash. The position of an object in the sorted array is its last index.
+When pass 1 finds an object for the first time, it gives the object a temporary index. At the end of pass 1, `Scan::finish` sorts the objects of each type by hash, on the `rayon` thread pool. The position of an object in the sorted array is its last index. `Scan::finish` then changes the temporary index to the last index in the copies and in the `HashIndex`. It does not build the `HashIndex` again.
 
 Thus the index of an object does not change when Git moves objects into different pack files. `Scan::finish` also changes all temporary indices in the copies to the last indices. Then it makes a new `HashIndex`.
 
