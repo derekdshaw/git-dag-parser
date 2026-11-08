@@ -17,15 +17,18 @@ use tracing::Level;
 use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeEntries};
 use crate::models::{NameStore, ObjectContainer, Ref};
 
-/// Raw commit data, every tree's entries, the tree entry names, the hash
-/// index, and the container
-pub type ParsedObjects = (
-    HashMap<ObjectHash, CommitRaw>,
-    TreeEntries,
-    NameStore,
-    HashIndex,
-    ObjectContainer,
-);
+/// The result of a parse
+pub struct ParseResult {
+    /// Every tree's entries
+    pub tree_entries: TreeEntries,
+    /// Tree entry names, which the tree entries refer to by id
+    pub names: NameStore,
+    /// Hash index, for resolving hashes to indices
+    pub hash_index: HashIndex,
+    /// Object container, with commit trees and parents, tag targets and refs
+    /// resolved to indices
+    pub container: ObjectContainer,
+}
 
 /// Options of a parse
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +47,7 @@ impl Default for ParseOptions {
 
 /// Parse all Git objects from a repository's object store with the default
 /// options
-pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
+pub fn parse_objects(git_dir: &Path) -> Result<ParseResult> {
     parse_objects_with(git_dir, &ParseOptions::default())
 }
 
@@ -56,15 +59,7 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParsedObjects> {
 /// 2. Bodies of commits, trees and tags from their primary copies. Tree
 ///    entry children are resolved to indices as the bodies are read, since
 ///    pass 1 indexed every object.
-///
-/// Returns:
-/// - Raw commit data
-/// - Every tree's entries
-/// - Tree entry names, which the tree entries refer to by id
-/// - Hash index (for resolving hashes to indices)
-/// - Object container, with commit trees and parents, tag targets and refs
-///   resolved to indices
-pub fn parse_objects_with(git_dir: &Path, options: &ParseOptions) -> Result<ParsedObjects> {
+pub fn parse_objects_with(git_dir: &Path, options: &ParseOptions) -> Result<ParseResult> {
     let mut scanned = scan::scan_repository(git_dir)?;
     let bodies::Bodies {
         commits_raw,
@@ -86,7 +81,12 @@ pub fn parse_objects_with(git_dir: &Path, options: &ParseOptions) -> Result<Pars
         container.refs.push(r);
     }
 
-    Ok((commits_raw, tree_entries, names, hash_index, container))
+    Ok(ParseResult {
+        tree_entries,
+        names,
+        hash_index,
+        container,
+    })
 }
 
 /// The default number of threads of pass 1 and 2 on a machine with `hardware`
@@ -152,7 +152,7 @@ mod benches {
     /// heap. The time is correct. The benchmark runs on rayon's default
     /// pool (all hardware threads), not the thread count of the binary.
     #[divan::bench(ignore, sample_count = 3, sample_size = 1)]
-    fn parse_objects_repo() -> super::ParsedObjects {
+    fn parse_objects_repo() -> super::ParseResult {
         let repo =
             std::env::var("GDP_BENCH_REPO").expect("set GDP_BENCH_REPO to a repository path");
         let path = Path::new(&repo);

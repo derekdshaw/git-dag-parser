@@ -25,8 +25,9 @@ pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
         format_size(options.delta_cache_limit)
     );
     let parse_start = Instant::now();
-    let (_commits_raw, _tree_entries, names, _hash_index, container) =
-        parser::parse_objects_with(&git_dir, options).context("Failed to parse Git objects")?;
+    let parser::ParseResult {
+        names, container, ..
+    } = parser::parse_objects_with(&git_dir, options).context("Failed to parse Git objects")?;
     let parse_elapsed = parse_start.elapsed();
 
     print_summary(&container, &names, parse_elapsed, start.elapsed());

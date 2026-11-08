@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::{count_by_kind, hex, parsed_objects, Repo};
 use git_dag_parser::models::ObjectId;
-use git_dag_parser::parser::{parse_objects, parse_objects_with, ParseOptions, ParsedObjects};
+use git_dag_parser::parser::{parse_objects, parse_objects_with, ParseOptions, ParseResult};
 
 #[test]
 fn every_object_matches_git_type_and_sizes() {
@@ -16,7 +16,7 @@ fn every_object_matches_git_type_and_sizes() {
         "fixture must contain deltified objects for this test to mean anything"
     );
 
-    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let container = parse_objects(&repo.git_dir()).unwrap().container;
 
     let expected = repo.git_objects();
     let actual = parsed_objects(&container);
@@ -43,7 +43,7 @@ fn objects_in_multiple_packs_are_counted_once() {
         "fixture must have overlapping packs"
     );
 
-    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let container = parse_objects(&repo.git_dir()).unwrap().container;
 
     let parsed: HashMap<String, usize> = [
         ("commit", container.commits.len()),
@@ -62,13 +62,19 @@ fn objects_in_multiple_packs_are_counted_once() {
 fn non_utf8_names_and_messages_are_parsed() {
     let repo = Repo::with_non_utf8();
 
-    let (commits_raw, tree_entries, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let ParseResult {
+        tree_entries,
+        container,
+        ..
+    } = parse_objects(&repo.git_dir()).unwrap();
 
-    assert_eq!(
-        commits_raw.len(),
-        container.commits.len(),
-        "every commit should have its header parsed"
-    );
+    for commit in &container.commits {
+        assert!(
+            commit.tree.is_some() && commit.commit_time > 0,
+            "commit {} should have its header parsed",
+            hex(&commit.hash)
+        );
+    }
     for tree in &container.trees {
         assert_eq!(
             tree_entries.entries(tree.index).count() > 0,
@@ -88,7 +94,12 @@ fn tree_entries_match_git_ls_tree() {
         Repo::with_non_utf8(),
         Repo::with_refs_and_merges(),
     ] {
-        let (_, tree_entries, names, _, container) = parse_objects(&repo.git_dir()).unwrap();
+        let ParseResult {
+            tree_entries,
+            names,
+            container,
+            ..
+        } = parse_objects(&repo.git_dir()).unwrap();
 
         for tree in &container.trees {
             let ours: Vec<(u32, Vec<u8>, String)> = tree_entries
@@ -127,7 +138,11 @@ fn tree_entries_match_git_ls_tree() {
 fn hash_index_points_at_each_object() {
     let repo = Repo::with_history();
 
-    let (_, _, _, hash_index, container) = parse_objects(&repo.git_dir()).unwrap();
+    let ParseResult {
+        hash_index,
+        container,
+        ..
+    } = parse_objects(&repo.git_dir()).unwrap();
 
     for c in &container.commits {
         assert_eq!(hash_index.commit(&c.hash), Some(c.index));
@@ -156,7 +171,7 @@ fn packs_match_files_on_disk() {
     assert!(pack_paths.len() >= 2);
     fs::write(pack_paths[1].with_extension("keep"), "").unwrap();
 
-    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let container = parse_objects(&repo.git_dir()).unwrap().container;
 
     assert_eq!(container.packs.len(), pack_paths.len());
     for (i, (pack, path)) in container.packs.iter().zip(&pack_paths).enumerate() {
@@ -184,7 +199,7 @@ fn every_on_disk_copy_is_recorded() {
     let loose_count = repo.loose_object_count();
     assert!(loose_count > 0, "fixture must have loose objects");
 
-    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let container = parse_objects(&repo.git_dir()).unwrap().container;
 
     for pack in &container.packs {
         let in_pack: Vec<_> = container
@@ -274,7 +289,7 @@ fn primary_copy_is_in_the_newest_pack() {
         file.set_modified(time).unwrap();
     }
 
-    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let container = parse_objects(&repo.git_dir()).unwrap().container;
 
     let newest = container
         .packs
@@ -322,7 +337,7 @@ fn primary_copy_is_in_the_newest_pack() {
 fn objects_are_in_hash_order() {
     let repo = Repo::with_overlapping_packs();
 
-    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let container = parse_objects(&repo.git_dir()).unwrap().container;
 
     let commits: Vec<_> = container
         .commits
@@ -373,7 +388,7 @@ fn ids_by_hash(container: &git_dag_parser::models::ObjectContainer) -> HashMap<S
 #[test]
 fn indices_do_not_change_when_packs_are_rewritten() {
     let repo = Repo::with_history();
-    let (_, _, _, _, before) = parse_objects(&repo.git_dir()).unwrap();
+    let before = parse_objects(&repo.git_dir()).unwrap().container;
     let packs_before = repo.pack_files("pack");
 
     // Packs all objects, including the loose ones, into one new pack
@@ -383,7 +398,7 @@ fn indices_do_not_change_when_packs_are_rewritten() {
         packs_before,
         "fixture must rewrite the packs"
     );
-    let (_, _, _, _, after) = parse_objects(&repo.git_dir()).unwrap();
+    let after = parse_objects(&repo.git_dir()).unwrap().container;
 
     assert_eq!(ids_by_hash(&after), ids_by_hash(&before));
 }
@@ -393,7 +408,7 @@ fn copy_disk_sizes_match_verify_pack() {
     let repo = Repo::with_overlapping_packs();
     let expected = repo.verify_pack_entries();
 
-    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let container = parse_objects(&repo.git_dir()).unwrap().container;
 
     let packed: Vec<_> = container.copies.iter().filter(|c| !c.is_loose()).collect();
     assert_eq!(packed.len(), expected.len());
@@ -412,7 +427,7 @@ fn cruft_pack_holds_the_unreachable_blob() {
     let dangling = String::from_utf8(repo.git(&["hash-object", "dangling.txt"])).unwrap();
     let dangling = dangling.trim();
 
-    let (_, _, _, _, container) = parse_objects(&repo.git_dir()).unwrap();
+    let container = parse_objects(&repo.git_dir()).unwrap().container;
 
     let cruft: Vec<_> = container.packs.iter().filter(|p| p.cruft).collect();
     assert_eq!(cruft.len(), 1, "one cruft pack");
@@ -438,8 +453,18 @@ fn a_one_byte_delta_cache_gives_the_same_parse() {
             repo.deltified_count() > 0,
             "fixture must contain deltified objects for this test to mean anything"
         );
-        let (_, entries, names, _, container) = parse_objects(&repo.git_dir()).unwrap();
-        let (_, small_entries, small_names, _, small_container) = parse_objects_with(
+        let ParseResult {
+            tree_entries: entries,
+            names,
+            container,
+            ..
+        } = parse_objects(&repo.git_dir()).unwrap();
+        let ParseResult {
+            tree_entries: small_entries,
+            names: small_names,
+            container: small_container,
+            ..
+        } = parse_objects_with(
             &repo.git_dir(),
             &ParseOptions {
                 delta_cache_limit: 1,
@@ -464,7 +489,7 @@ fn a_one_byte_delta_cache_gives_the_same_parse() {
 }
 
 /// A parse with the default options on a rayon pool of `threads` threads
-fn parse_on_threads(repo: &Repo, threads: usize) -> ParsedObjects {
+fn parse_on_threads(repo: &Repo, threads: usize) -> ParseResult {
     let git_dir = repo.git_dir();
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -477,22 +502,26 @@ fn parse_on_threads(repo: &Repo, threads: usize) -> ParsedObjects {
 type Entry = (Option<usize>, Vec<u8>, u32);
 
 /// Everything a parse gives, in a form that two parses can be compared by:
-/// the container's Debug output (ObjectContainer has no PartialEq), the raw
-/// commits sorted by hash, and each tree's entries with their names as
-/// bytes, since name ids depend on which worker interned a name first
-fn snapshot(parsed: &ParsedObjects) -> (String, String, Vec<Vec<Entry>>) {
-    let (commits_raw, entries, names, _, container) = parsed;
-    let mut commits: Vec<_> = commits_raw.iter().collect();
-    commits.sort_by_key(|(hash, _)| **hash);
+/// the container's Debug output (ObjectContainer has no PartialEq), which
+/// has each commit's tree, parents and time, and each tree's entries with
+/// their names as bytes, since name ids depend on which worker interned a
+/// name first
+fn snapshot(parsed: &ParseResult) -> (String, Vec<Vec<Entry>>) {
+    let ParseResult {
+        tree_entries,
+        names,
+        container,
+        ..
+    } = parsed;
     let trees = (0..container.trees.len())
         .map(|tree| {
-            entries
+            tree_entries
                 .entries(tree)
                 .map(|(child, name, kind)| (child, names.get(name).to_vec(), kind.mode()))
                 .collect()
         })
         .collect();
-    (format!("{container:?}"), format!("{commits:?}"), trees)
+    (format!("{container:?}"), trees)
 }
 
 /// Fixtures with deltas, several packs, loose objects, non-UTF-8 names, and
