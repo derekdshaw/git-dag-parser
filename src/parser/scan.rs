@@ -1,10 +1,11 @@
 //! Pass 1 of parsing: find every pack and loose file, read object headers
 //! only, and decide which on-disk copy of each object is its primary.
 //!
-//! Packs are read in offset order so each is touched sequentially from
-//! front to back. While reading, an object gets a provisional index the
-//! first time its hash is seen. When the scan ends, each kind is sorted by
-//! hash, so the final index does not depend on how the objects are packed.
+//! The headers of a pack are read on the current rayon pool, and then each
+//! entry is recorded on one thread, in offset order. While recording, an
+//! object gets a provisional index the first time its hash is seen. When the
+//! scan ends, each kind is sorted by hash on the same pool, so the final index
+//! does not depend on how the objects are packed.
 
 use std::cmp::Reverse;
 use std::fs;
@@ -13,6 +14,7 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
+use rayon::prelude::*;
 use tracing::{info, warn};
 
 use super::content::hex_to_hash;
@@ -222,12 +224,7 @@ impl Scan {
             }
         }
 
-        let mut index = HashIndex::with_capacity(self.index.len());
-        index_all(&mut index, &c.commits, |o| o.hash, ObjectId::Commit);
-        index_all(&mut index, &c.trees, |o| o.hash, ObjectId::Tree);
-        index_all(&mut index, &c.blobs, |o| o.hash, ObjectId::Blob);
-        index_all(&mut index, &c.tags, |o| o.hash, ObjectId::Tag);
-        self.index = index;
+        self.index.renumber(renumber);
     }
 
     /// Position in `container.copies` of the object's primary copy
@@ -275,14 +272,15 @@ impl Scan {
     }
 }
 
-/// Sort objects by hash and renumber them. Returns the new index of each
-/// object, by its old index.
-fn sort_by_hash<T>(
+/// Sort objects by hash on the current rayon pool and renumber them. The
+/// hashes of a kind are unique, so the order does not depend on the number of
+/// threads. Returns the new index of each object, by its old index.
+fn sort_by_hash<T: Send>(
     objects: &mut [T],
-    hash: impl Fn(&T) -> ObjectHash,
+    hash: impl Fn(&T) -> ObjectHash + Sync,
     index: impl Fn(&mut T) -> &mut usize,
 ) -> Vec<usize> {
-    objects.sort_unstable_by_key(|o| hash(o));
+    objects.par_sort_unstable_by_key(|o| hash(o));
     let mut new_index = vec![0; objects.len()];
     for (pos, object) in objects.iter_mut().enumerate() {
         let slot = index(object);
@@ -290,17 +288,6 @@ fn sort_by_hash<T>(
         *slot = pos;
     }
     new_index
-}
-
-fn index_all<T>(
-    index: &mut HashIndex,
-    objects: &[T],
-    hash: impl Fn(&T) -> ObjectHash,
-    id: impl Fn(usize) -> ObjectId,
-) {
-    for (i, object) in objects.iter().enumerate() {
-        index.insert(hash(object), id(i));
-    }
 }
 
 /// A pack held open across both passes
@@ -416,12 +403,13 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
 
     let c = &scan.container;
     info!(
-        "Pass 1 (headers): C:{} T:{} B:{} t:{} from {} copies in {:?}",
+        "Pass 1 (headers): C:{} T:{} B:{} t:{} from {} copies on {} threads in {:?}",
         c.commits.len(),
         c.trees.len(),
         c.blobs.len(),
         c.tags.len(),
         c.copies.len(),
+        rayon::current_num_threads(),
         start.elapsed()
     );
 

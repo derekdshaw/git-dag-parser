@@ -131,7 +131,7 @@ Total:  135.737749ms
 
 ### Threads and memory
 
-Pass 2 uses more than one thread. It uses a quarter of the hardware threads of the computer. If that is fewer than 8, it uses 8 threads. On a computer with 8 hardware threads or fewer, it uses one thread fewer than the computer has, so that one stays free. For example, it uses 32 threads on 128, 8 on 16, 7 on 8, and 3 on 4. To set a different number, set the `RAYON_NUM_THREADS` environment variable.
+Pass 2, and the header read and the sorts by hash of pass 1, use more than one thread. They use a quarter of the hardware threads of the computer. If that is fewer than 8, they use 8 threads. On a computer with 8 hardware threads or fewer, they use one thread fewer than the computer has, so that one stays free. For example, they use 32 threads on 128, 8 on 16, 7 on 8, and 3 on 4. To set a different number, set the `RAYON_NUM_THREADS` environment variable.
 
 `--delta-cache-size` sets the byte limit of the delta caches of all threads together. The default is `1gb`. Each thread gets an equal share. A smaller limit uses less memory, but the program can be slower, because it makes more bases again.
 

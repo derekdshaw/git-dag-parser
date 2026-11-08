@@ -110,6 +110,14 @@ impl HashIndex {
         self.map.insert(hash, id)
     }
 
+    /// Change the id of each object in place. The hashes do not change, so
+    /// the map does not need to be built again.
+    pub fn renumber(&mut self, f: impl Fn(ObjectId) -> ObjectId) {
+        for id in self.map.values_mut() {
+            *id = f(*id);
+        }
+    }
+
     /// Find an object of any type by hash
     pub fn get(&self, hash: &ObjectHash) -> Option<ObjectId> {
         self.map.get(hash).copied()
@@ -502,6 +510,21 @@ mod tests {
         assert_eq!(index.get(&[1; 20]), Some(ObjectId::Commit(4)));
         assert_eq!(index.get(&[2; 20]), Some(ObjectId::Blob(9)));
         assert_eq!(index.get(&[3; 20]), None);
+    }
+
+    #[test]
+    fn hash_index_renumber_changes_each_id_and_keeps_each_hash() {
+        let mut index = HashIndex::new();
+        index.insert([1; 20], ObjectId::Commit(4));
+        index.insert([2; 20], ObjectId::Blob(9));
+        index.insert([3; 20], ObjectId::Tree(0));
+
+        index.renumber(|id| ObjectId::new(id.kind(), id.index() + 10));
+
+        assert_eq!(index.len(), 3);
+        assert_eq!(index.get(&[1; 20]), Some(ObjectId::Commit(14)));
+        assert_eq!(index.get(&[2; 20]), Some(ObjectId::Blob(19)));
+        assert_eq!(index.get(&[3; 20]), Some(ObjectId::Tree(10)));
     }
 
     #[test]
