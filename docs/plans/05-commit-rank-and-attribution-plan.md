@@ -16,11 +16,14 @@ This step finds the commit that added each tree and each blob. This commit is th
 
 - Repository: this repository (Rust, binary and library crate).
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
-- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse).
-- Data that this step uses:
-  - `Commit.tree` (index of the root tree), `Commit.parents`, `Commit.boundary`, `Commit.commit_time`, `Commit.hash`.
-  - `TreeEntries` (step 4.1): flat arrays `start`, `child` (`u32`), `name` (`NameId`), and `mode`. Use `entries(tree)` to read the entries of one tree.
-  - Indices are in hash order.
+- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 10 (CI and releases).
+- Do step 11 (`docs/plans/11-move-dag-parsing-to-lib-plan.md`) before this step. After step 11, the parser is a library crate, and `src/attribution/` goes in the application crate. Step 11 updates the paths in this plan.
+  - Step 11 moves the `Repo` fixtures (`tests/common/`) to the crate `crates/test-fixtures`. The integration tests of this step are in the application crate and use this crate as a dev-dependency.
+- Data that this step uses, from `ParseResult` (`container` and `tree_entries`):
+  - `Commit.tree` (`Option<usize>`, index of the root tree, `None` if the tree is not in the store), `Commit.parents` (`Vec<usize>`, only parents in the store), `Commit.boundary`, `Commit.commit_time` (`i64`), `Commit.hash`.
+  - `TreeEntries` (step 4.1): private flat arrays `start` (`u64`), `child` (`u32`), `name` (`NameId`), and `mode` (`FileKind` as one byte). `entries(tree)` gives `(Option<usize>, NameId, FileKind)` for each entry of one tree. The `FileKind` tells if the child is a tree or a blob. The child is `None` (`TreeEntries::NO_CHILD`) for a submodule and for a child that is not in the store.
+  - Indices are in hash order. Thus the order of commit indices is the hash order.
+  - The model uses `usize` for indices. The arrays of this step use `u32` (see "Memory").
 - Memory: a large monorepo can have approximately 3.9 million trees, 4.9 million blobs, and 1.2 billion tree entries (an estimate at 50 bytes of tree data for each entry; on linux the real count was 528 million, 34% more than this estimate gave, so plan for about 1.6 billion). Do not copy the entries. Use only `u32` and atomic `u32` arrays with one value for each object.
 - Step 4.1 removed `build_relationships` (`src/parser/relationships.rs`, `WalkResult`, `Commit.tree_deps`, `Commit.blob_deps`, `Tree.commits`, `Blob.commits`, `Tree.paths`, `Blob.paths`). At this time, `init` runs only the parse. This step adds the rank and owner calculation after the parse.
 
@@ -36,7 +39,7 @@ This step finds the commit that added each tree and each blob. This commit is th
 
 ## Decisions already made
 
-- Rank commits by (corrected date, hash). Do not rank by generation number.
+- Rank commits by (corrected date, hash). Do not rank by generation number. Because the commit indices are in hash order, sort by (corrected date, commit index).
 - Committer time alone is not safe. Clock errors and rebases can give a child an earlier time than its parent. The `+ 1` in the corrected date stops this problem.
 - An ancestor always has a lower rank than its descendants. Thus a merge never owns objects that a parent already has.
 - The hash tie-break applies only to commits that are not ancestors of each other.
@@ -74,13 +77,18 @@ A commit can reach `o` only if `o` is its root tree, or if the commit can reach 
    4. Put all trees with in-degree 0 into the first frontier. This includes trees that no commit reaches.
    5. For each round, process the frontier trees in parallel (`rayon`). For each entry of tree `T`:
       - Do `owner[child].fetch_min(owner[T])`.
-      - A tree with many entries (a large monorepo can have one with approximately 84,000) is a large unit of work. Process its entries in parallel chunks.
+      - A tree with many entries (a large monorepo can have one with approximately 84,000) is a large unit of work. Process its entries in parallel chunks. `entries(tree)` is an iterator, so add a method to `TreeEntries` that gives the `child` and `mode` slices of one tree.
+      - Tests must use a small chunk size, so that a small tree is cut into chunks. Use two module-level constants side by side, `#[cfg(not(test))]` and `#[cfg(test)]`, as `GATHER_CHUNK` does (`src/models/container.rs`). A constant inside `mod tests` is not visible to the parent module.
       - If the child is a tree, decrease its in-degree by 1. If the in-degree becomes 0, put the child in the next frontier.
    6. Stop when the frontier is empty.
-   7. Ignore submodule entries and entries with `child == u32::MAX`.
+   7. Ignore entries with no child (`None` from `entries`, `NO_CHILD` in the slice). This includes all submodule entries.
 7. Add `introduced_by: Option<u32>` (commit index) to `Tree` and `Blob`. Convert the rank to the commit index. `u32::MAX` gives `None`.
 8. There is no old walk to remove. Step 4.1 removed it. Step 6 adds paths again in a new form.
-9. Update `src/commands/init.rs` to call the rank and owner calculation after the parse. Show its time as `Phase 2 (attribution): <time>`, and read this line in `scripts/benchmarks/harness.py` (step 4.1 removed the `Phase 2 (relationships)` line that timed `build_relationships`).
+9. Update `src/commands/init.rs` to call the rank and owner calculation after the parse.
+   - Show the number of commits from item 5 in the `=== DAG Summary ===` section.
+   - Show the time as `Attribution: <time>` in the `=== Timing ===` section, after `Parse:` and before `Total:`. Use the `{:?}` format of `Duration`, as the other lines do. Step 4.1 renamed `Phase 1 (parse):` to `Parse:` and removed `Phase 2 (relationships)`.
+   - `scripts/benchmarks/harness.py` reads the info log lines and the summary from stdout, and takes the last line that starts with `Total:`. Keep `Total:` as the last line.
+   - In `harness.py`, add `attribution_s` (`^Attribution:\s+(\S+)$`). Change the window `resolve_refs` to end at `parse_s`, and add the window `attribution` from `parse_s` to `parse_s + attribution_s`.
 
 ## Tests
 
@@ -91,7 +99,7 @@ Unit tests (in `rank.rs` and `owner.rs`):
 - Corrected date with a clock error: P has time 1000. Its child C has time 900. C gets 1001. The child G of C has time 950. G gets 1002.
 - Rank tie-break: two commits with the same corrected date sort by hash.
 - A commit with a missing parent uses its own time.
-- Owner on a small hand-made graph:
+- Owner on a small hand-made graph. Make the `TreeEntries` with `TreeEntriesBuilder` and `TreeEntries::merge`, as `merge_one` does in the tests of `src/models/container.rs`.
   - Two commits share a subtree. The lower rank owns it.
   - One blob is at two paths in one tree. It has one owner.
   - A tree that no commit reaches has no owner.
@@ -108,12 +116,15 @@ Integration tests (in `tests/`, with new `Repo` fixtures):
 - Oracle 1: for each commit `c` in rank order, run `git rev-list --objects --no-object-names c --not <all commits with lower rank>`. The output is the set of objects that `c` owns. Compare with `introduced_by`.
 - Oracle 2: write a simple sequential walk in the test helper. Walk commits in rank order. Keep a "seen" set. The first commit that reaches an object owns it. Compare with the parallel result.
 - The rename, the empty commit, and the revert own no old blobs.
+- A tree or blob that only an annotated tag reaches (for example, a tag of a blob) has no owner. Oracle 1 agrees, because it lists only objects that commits reach.
+- A repository with no commits gives no owners and does not panic (see plan 09, "Fix D: Empty repository").
 
 ## Make sure the result is correct on real repositories
 
 - Use a small program in the session scratchpad. Run oracle 2 on this repository and on the repositories in `docs/benchmarks/README.md`.
-- Run the harness on vscode and git-ms. Compare the time of the rank and owner calculation with the old `build_relationships` (harness, commit `b50d421`): vscode 8.0 s, git-ms 10.3 s.
-- Run the new phase on linux (see `docs/benchmarks/README.md`) with a watchdog on `RssAnon` (see step 4.1). Do not write to that repository. Record the number of frontier rounds, the time, the peak `RssAnon`, and the number of commits where the corrected date is not equal to the committer time.
+- Run the harness on vscode and git-ms. Compare the time of the rank and owner calculation with the old `build_relationships` (harness, commit `b50d421`): vscode 8.0 s, git-ms 10.3 s. For scale, the parse after step 4.1 is 1.3–1.5 s on vscode and 2.8–2.9 s on git-ms (32 threads).
+- Run the harness on linux (see `docs/benchmarks/README.md`) with `--limit-gb 48`. Do not write to that repository. Record the number of frontier rounds, the time, the peak `RssAnon` of the `attribution` window, and the number of commits where the corrected date is not equal to the committer time. After step 4.1 the peak of the linux parse is 8.94–9.10 GB on 32 threads; each array of this step has 4 bytes for each tree, blob, or commit (10.5 million objects on linux in all).
+- `harness.py` gives `init` only `RUST_LOG` and `PATH`, so `RAYON_NUM_THREADS` does not change the thread count of its runs. It samples `RssAnon` every 0.2 s, which is too slow for a run of less than about 1 s, such as zed.
 
 ## Out of scope
 

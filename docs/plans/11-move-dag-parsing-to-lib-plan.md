@@ -29,8 +29,8 @@ The parsing side is about 4,800 of 5,050 lines.
 
 The parser builds these edges:
 
-- `resolve_commits` (`src/parser/mod.rs:82`): the root tree and the parents of each commit.
-- `resolve_tags` (`src/parser/mod.rs:101`): the target of each annotated tag.
+- `resolve_commits` (`src/parser/mod.rs:127`): the root tree and the parents of each commit.
+- `resolve_tags` (`src/parser/mod.rs:146`): the target of each annotated tag.
 - Pass 2: the child of each tree entry, in `TreeEntries`.
 
 ### Work in later plans, by side
@@ -60,30 +60,27 @@ Plans 05 to 09 refer to paths such as `src/parser/...`. This step must update th
        ObjectContainer,
    );
    ```
-   A library must return a struct with named fields. `CommitRaw` has data that `Commit` also holds after the resolution. Decide if `CommitRaw` stays public. Its comment is also not correct: `src/models/container.rs:164` says "Raw commit data extracted during Phase 1 parsing", but pass 2 reads the commit bodies.
-2. **The library draws progress bars.** `src/parser/mod.rs:73` has `fn progress_bar(len: u64) -> ProgressBar`, and `src/parser/bodies.rs:12` has `use indicatif::ProgressStyle;`. A library must send progress through a callback or through `tracing` events only. The binary draws the bars.
+   A library must return a struct with named fields. `CommitRaw` has data that `Commit` also holds after the resolution. Decide if `CommitRaw` stays public. Its comment is also not correct: `src/models/container.rs:173` says "Raw commit data extracted during Phase 1 parsing", but pass 2 reads the commit bodies.
+2. **The library draws progress bars.** `src/parser/mod.rs:118` has `fn progress_bar(len: u64) -> ProgressBar`, and `src/parser/bodies.rs:15` has `use indicatif::{ProgressBar, ProgressStyle};`. Only pass 2 draws a bar. A library must send progress through a callback or through `tracing` events only. The binary draws the bars.
 3. **The library uses `anyhow`.** All eight files in `src/parser/` use `anyhow` and `.context(...)`. The rule for libraries is `thiserror`. Each `.context` call becomes a `ParseError` variant. This is the largest item.
-4. **`find_git_dir` is in the binary.** It is at `src/commands/init.rs:34`. A library user must have it. Plan 09 fix A moves it to `src/repo.rs`.
-5. **The hash width is in the public types.** `src/models/container.rs:7` has `pub type ObjectHash = [u8; 20];`. SHA-256 support (plan 09 fix C) changes this type. After the library has other users, this change breaks their code.
+4. **`find_git_dir` is in the binary.** It is at `src/commands/init.rs:37`. A library user must have it. Plan 09 fix A moves it to `src/repo.rs`.
+5. **The hash width is in the public types.** `src/models/container.rs:8` has `pub type ObjectHash = [u8; 20];`. SHA-256 support (plan 09 fix C) changes this type. After the library has other users, this change breaks their code.
 6. **Some data is only for the bloat analysis.** `ObjectCopy`, `Pack`, `loose_mtimes`, `size_disk`, and the primary copy are data about the object store. Keep them in the library. A general user pays for them: one 32-byte `ObjectCopy` for each on-disk copy, millions for a large repository. Do not make this optional in this step.
 
 ## Decisions already made
 
 - Use a Cargo workspace in this repository. Do not make a separate repository. A separate repository is useful only when a second project uses the library. Before that, it adds version changes in two repositories and slows each change.
-- The library crate contains `src/parser/`, `src/models/`, `ParseError`, and the `bench` feature with the benchmarks. A possible path is `crates/git-dag-parser-core`.
+- The library crate contains `src/parser/`, `src/models/`, `ParseError`, and the `bench` feature with the benchmarks. Its path is `crates/git-dag-parser-core`.
 - The binary crate stays at the root. It contains `src/cli.rs`, `src/main.rs`, `src/commands/`, and `DagError`.
-- The integration tests (`tests/parse.rs`, `tests/model.rs`, `tests/common/`) and `tests/git_oracle.rs` move with the library.
+- The integration tests (`tests/parse.rs`, `tests/model.rs`) and `tests/git_oracle.rs` move with the library.
 
-## Open questions
+Answers of the user (2026-11-09) to the open questions of this plan:
 
-Get answers from the user before the work starts:
-
-1. Is the library for other projects, or only a clear boundary in this tool?
-   - For other projects: do items 3 and 5 of "Coupling to repair" before the first release of the library.
-   - Only a boundary: the workspace and items 1, 2, and 4 are sufficient. Items 3 and 5 can wait.
-2. The name and the path of the library crate.
-3. Is `CommitRaw` public (item 1)? It is not in `ParseResult`, so only pass 2 uses it. It can become `pub(crate)` or move to `src/parser/`.
-4. Progress: a callback, or `tracing` events only (item 2)?
+- The library is only a clear boundary in this tool, not for other projects. The workspace and items 1, 2, and 4 of "Coupling to repair" are sufficient. Do not do items 3 (`thiserror`) and 5 (hash width) in this step.
+- The library crate is `git-dag-parser-core`, at `crates/git-dag-parser-core`.
+- `CommitRaw` is not public. Move it from `src/models/container.rs` to `src/parser/` as `pub(crate)`, and correct its comment: pass 2 reads the commit bodies, not phase 1.
+- Progress uses `tracing` events only. The library does not use `indicatif`. The binary draws the progress bar from the events.
+- The `Repo` fixtures (`tests/common/`) go in a small crate that is not published, `crates/test-fixtures`. The library crate and the application crate use it as a dev-dependency. Step 5 adds integration tests to the application crate, and these tests use the same fixtures.
 
 ## Work to do
 
@@ -91,18 +88,19 @@ Do the items in this sequence. Each item is one commit.
 
 1. **Repair items 1, 2, and 4 in the current crate.** No files move.
    1. Replace `ParsedObjects` with a struct. Update `src/commands/init.rs` and the tests. (Done in plan 4.1 part 8.)
-   2. Remove `indicatif` from `src/parser/`. Show the progress in the binary.
-   3. Move `find_git_dir` to `src/repo.rs` (plan 09 fix A). If fix A is already done, skip this item.
-   4. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo clippy --all-targets --features bench -- -D warnings`, and `cargo test`.
+   2. Move `CommitRaw` to `src/parser/` as `pub(crate)`.
+   3. Remove `indicatif` from `src/parser/`. Send the progress of pass 2 as `tracing` events. Show the progress bar in the binary.
+   4. Move `find_git_dir` to `src/repo.rs` (plan 09 fix A). If fix A is already done, skip this item.
+   5. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo clippy --all-targets --features bench -- -D warnings`, and `cargo test`.
 2. **Make the workspace and move the files.**
    1. Add `[workspace]` to the root `Cargo.toml`, and make the library crate.
    2. Move `src/parser/`, `src/models/`, `ParseError`, the benchmarks, and the tests to the library crate. Move the dependencies that only the library uses.
-   3. The binary crate uses the library crate as a path dependency.
-   4. In `.github/workflows/ci.yml`, add `--workspace` to `cargo build`, `cargo test`, and `cargo clippy` in the `test` job and in the `bench` job. If the root is a package and also a workspace, `cargo test` without `--workspace` tests only the root crate. Add `--all` to `cargo fmt --check`.
-   5. Make sure that `cargo build --release --bin git-dag-parser` gives the same binary name. The `build-release` job uses it.
-   6. Update `scripts/benchmarks/` and `docs/benchmarks/README.md` if they use the old paths or `--features bench` on the root crate.
-3. **Change the library errors to `thiserror` (item 3).** Only if the answer to open question 1 is "for other projects". Keep the object hash or the file name in each error, as `.context` does now.
-4. **Update the plans and the documents.**
+   3. Move `tests/common/` to the crate `crates/test-fixtures` (not published, `publish = false`). The tests of the library crate use it as a dev-dependency.
+   4. The binary crate uses the library crate as a path dependency, and `crates/test-fixtures` as a dev-dependency.
+   5. In `.github/workflows/ci.yml`, add `--workspace` to `cargo build`, `cargo test`, and `cargo clippy` in the `test` job and in the `bench` job. If the root is a package and also a workspace, `cargo test` without `--workspace` tests only the root crate. Add `--all` to `cargo fmt --check`.
+   6. Make sure that `cargo build --release --bin git-dag-parser` gives the same binary name. The `build-release` job uses it.
+   7. Update `scripts/benchmarks/` and `docs/benchmarks/README.md` if they use the old paths or `--features bench` on the root crate.
+3. **Update the plans and the documents.**
    1. Update the paths in plans 05 to 09.
    2. Update `README.md` and `ARCHITECTURE.md`. Write them in ASD-STE100 Simplified Technical English, the same as the current files.
 
@@ -119,6 +117,7 @@ Do the items in this sequence. Each item is one commit.
 - Do not publish the library to crates.io.
 - Do not make the bloat data (item 6) optional.
 - Do not change the hash type (item 5) in this step. Plan 09 fix C does that.
+- Do not change the library errors to `thiserror` (item 3). The library is only a boundary in this tool.
 - Do not add the graph code from steps 5 to 8.
 
 ## Rules for this work
@@ -130,4 +129,4 @@ Do the items in this sequence. Each item is one commit.
 
 ## Prompt to start this step
 
-> In this repository, do step 11 from docs/plans/11-move-dag-parsing-to-lib-plan.md. First ask me the open questions. Show me the diff before each commit, and do not commit until I approve.
+> In this repository, do step 11 from docs/plans/11-move-dag-parsing-to-lib-plan.md. The open questions are answered in "Decisions already made". Show me the diff before each commit, and do not commit until I approve.
