@@ -17,7 +17,8 @@ For the meaning of terms such as work unit, worker, and delta family, refer to "
 |---|---|
 | `src/main.rs` | Sets the memory allocator, the log level, and the number of threads. Then it runs the command. |
 | `src/cli.rs` | The command-line arguments (`clap`). |
-| `src/commands/init.rs` | The `init` command. It finds the Git directory, parses the objects, and shows the summary. |
+| `src/commands/init.rs` | The `init` command. It finds the Git directory with `find_git_dir`, parses the objects, and shows the summary. |
+| `src/repo.rs` | `find_git_dir`, which finds the Git directory of a repository. |
 | `src/commands/analyze.rs`, `src/commands/query.rs` | Commands that show only a message at this time. |
 | `src/parser/mod.rs` | `parse_objects`: pass 1, pass 2, and the last steps. |
 | `src/parser/scan.rs` | Pass 1. |

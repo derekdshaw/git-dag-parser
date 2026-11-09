@@ -3,6 +3,9 @@ use thiserror::Error;
 /// Errors that can occur during Git object parsing
 #[derive(Error, Debug)]
 pub enum ParseError {
+    #[error("Not a valid Git repository: {0}")]
+    NotAGitRepo(String),
+
     #[error("Invalid pack file header: expected 'PACK', got {0:?}")]
     InvalidPackHeader([u8; 4]),
 
@@ -44,9 +47,6 @@ pub enum DagError {
     #[allow(dead_code)]
     #[error("Repository not found at: {0}")]
     RepoNotFound(String),
-
-    #[error("Not a valid Git repository: {0}")]
-    NotAGitRepo(String),
 
     #[allow(dead_code)]
     #[error("DAG file not found: {0}")]
