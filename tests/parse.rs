@@ -488,6 +488,34 @@ fn a_one_byte_delta_cache_gives_the_same_parse() {
     }
 }
 
+#[test]
+fn the_parse_result_has_the_delta_cache_stats_of_each_pack() {
+    let repo = Repo::with_overlapping_packs();
+    let parsed = parse_objects(&repo.git_dir()).unwrap();
+    assert!(
+        parsed.container.packs.len() > 1,
+        "fixture must have more than one pack"
+    );
+    assert_eq!(parsed.delta_cache.len(), parsed.container.packs.len());
+    let hits: u64 = parsed.delta_cache.iter().map(|s| s.hits).sum();
+    assert!(hits > 0, "{:?}", parsed.delta_cache);
+
+    // Nothing fits in a 1-byte cache
+    let small = parse_objects_with(
+        &repo.git_dir(),
+        &ParseOptions {
+            delta_cache_limit: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(small.delta_cache.len(), small.container.packs.len());
+    assert!(
+        small.delta_cache.iter().all(|s| s.hits == 0),
+        "{:?}",
+        small.delta_cache
+    );
+}
+
 /// A parse with the default options on a rayon pool of `threads` threads
 fn parse_on_threads(repo: &Repo, threads: usize) -> ParseResult {
     let git_dir = repo.git_dir();

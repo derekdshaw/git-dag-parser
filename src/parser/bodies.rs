@@ -9,7 +9,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -34,6 +34,10 @@ pub struct Bodies {
     pub tree_entries: TreeEntries,
     /// The entry names that `tree_entries` refers to
     pub names: NameStore,
+    /// The delta cache counts of each pack, in pack order
+    pub delta_cache: Vec<DeltaCacheStats>,
+    /// Time of pass 2
+    pub elapsed: Duration,
 }
 
 /// The reads of one work unit
@@ -56,6 +60,7 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
         scan,
         packs,
         objects_dir,
+        ..
     } = scanned;
 
     let to_read =
@@ -115,7 +120,7 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
         .into_iter()
         .map(|w| w.into_inner().expect("no worker panicked"))
         .collect();
-    let (bodies, tags) = merge(
+    let (mut bodies, tags) = merge(
         parts,
         scan.container.commits.len(),
         scan.container.trees.len(),
@@ -125,6 +130,8 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
         tag.name = raw.name;
         tag.target_hash = raw.target;
     }
+    bodies.delta_cache = pack_stats.into_iter().map(|(_, stats)| stats).collect();
+    bodies.elapsed = start.elapsed();
     info!(
         "Pass 2 (bodies): {} commits, {} trees ({} entries), {} tags on {} threads in {:?}",
         bodies.commits_raw.len(),
@@ -132,7 +139,7 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
         bodies.tree_entries.entry_count(),
         scan.container.tags.len(),
         threads,
-        start.elapsed()
+        bodies.elapsed
     );
 
     Ok(bodies)
@@ -314,6 +321,8 @@ fn merge(
             commits_raw,
             tree_entries,
             names,
+            delta_cache: Vec::new(),
+            elapsed: Duration::ZERO,
         },
         tags,
     ))
