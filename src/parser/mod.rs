@@ -10,11 +10,10 @@ mod work;
 use std::path::Path;
 
 use anyhow::Result;
-use hashbrown::HashMap;
 use indicatif::ProgressBar;
 use tracing::Level;
 
-use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeEntries};
+use crate::models::container::{CommitRaw, HashIndex, TreeEntries};
 use crate::models::{NameStore, ObjectContainer, Ref};
 
 /// The result of a parse
@@ -110,11 +109,11 @@ fn progress_bar(len: u64) -> ProgressBar {
 
 /// Resolve each commit's root tree and parents to indices
 fn resolve_commits(
-    commits_raw: &HashMap<ObjectHash, CommitRaw>,
+    commits_raw: &[CommitRaw],
     hash_index: &HashIndex,
     container: &mut ObjectContainer,
 ) {
-    for raw in commits_raw.values() {
+    for raw in commits_raw {
         let commit = &mut container.commits[raw.index];
         commit.tree = hash_index.tree(&raw.root_tree_hash);
         commit.parents = raw
