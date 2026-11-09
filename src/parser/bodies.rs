@@ -12,7 +12,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use tracing::info;
 
@@ -22,6 +21,7 @@ use super::loose::read_loose_object;
 use super::pack::PackReader;
 use super::scan::{OpenPack, Scan, Scanned};
 use super::work::{unit_reads, work_units};
+use super::PROGRESS_TARGET;
 use crate::error::ParseError;
 use crate::models::container::{HashIndex, ObjectHash, TreeEntries, TreeEntriesBuilder};
 use crate::models::{NameStore, ObjectId, ObjectKind};
@@ -65,13 +65,7 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
 
     let to_read =
         scan.container.commits.len() + scan.container.trees.len() + scan.container.tags.len();
-    let progress = super::progress_bar(to_read as u64);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("  Reading bodies [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) [{elapsed_precise}] {msg}")
-            .expect("valid template")
-            .progress_chars("#>-"),
-    );
+    info!(target: PROGRESS_TARGET, total = to_read as u64, "Reading bodies");
 
     let units = units(scan, packs, unit_reads(to_read, threads));
     // One for each thread of the pool, and one for the calling thread: rayon
@@ -85,7 +79,7 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
         .map(|unit| {
             let thread = rayon::current_thread_index().unwrap_or(threads);
             let mut parsed = workers[thread].lock().expect("no worker panicked");
-            match unit {
+            let (done, stats) = match unit {
                 Unit::Pack { pack, reads } => {
                     let stats = read_pack_unit(
                         scan_ref,
@@ -93,18 +87,21 @@ pub fn read_bodies(scanned: &mut Scanned, delta_cache_limit: u64) -> Result<Bodi
                         reads,
                         cache_limit,
                         &mut parsed,
-                        &progress,
                     )?;
-                    Ok(Some((*pack, stats)))
+                    (reads.len(), Some((*pack, stats)))
                 }
                 Unit::Loose(positions) => {
-                    read_loose_unit(scan_ref, objects_dir, positions, &mut parsed, &progress)?;
-                    Ok(None)
+                    read_loose_unit(scan_ref, objects_dir, positions, &mut parsed)?;
+                    (positions.len(), None)
                 }
-            }
+            };
+            // One event per unit, not per object: tens of millions of
+            // events would slow pass 2
+            info!(target: PROGRESS_TARGET, done = done as u64);
+            Ok(stats)
         })
         .collect::<Result<Vec<_>>>()?;
-    progress.finish_and_clear();
+    info!(target: PROGRESS_TARGET, finish = true);
 
     // Units and summed cache stats of each pack
     let mut pack_stats = vec![(0, DeltaCacheStats::default()); packs.len()];
@@ -181,7 +178,6 @@ fn read_pack_unit(
     reads: &[u32],
     cache_limit: u64,
     parsed: &mut Parsed,
-    progress: &ProgressBar,
 ) -> Result<DeltaCacheStats> {
     let copies =
         &scan.container.copies[open.first_copy..open.first_copy + open.index.entries.len()];
@@ -206,7 +202,6 @@ fn read_pack_unit(
             )
         })?;
         parsed.add(id, &hash, body, &scan.index)?;
-        progress.inc(1);
     }
     Ok(reader.stats())
 }
@@ -217,7 +212,6 @@ fn read_loose_unit(
     objects_dir: &Path,
     positions: &[usize],
     parsed: &mut Parsed,
-    progress: &ProgressBar,
 ) -> Result<()> {
     for &pos in positions {
         let id = scan.container.copies[pos].object();
@@ -235,7 +229,6 @@ fn read_loose_unit(
             .into());
         }
         parsed.add(id, &hash, &body, &scan.index)?;
-        progress.inc(1);
     }
     Ok(())
 }
