@@ -492,7 +492,10 @@ fn a_one_byte_delta_cache_gives_the_same_parse() {
 fn the_parse_result_has_the_delta_cache_stats_of_each_pack() {
     let repo = Repo::with_overlapping_packs();
     let parsed = parse_objects(&repo.git_dir()).unwrap();
-    assert!(parsed.container.packs.len() > 1, "fixture must have more than one pack");
+    assert!(
+        parsed.container.packs.len() > 1,
+        "fixture must have more than one pack"
+    );
     assert_eq!(parsed.delta_cache.len(), parsed.container.packs.len());
     let hits: u64 = parsed.delta_cache.iter().map(|s| s.hits).sum();
     assert!(hits > 0, "{:?}", parsed.delta_cache);
