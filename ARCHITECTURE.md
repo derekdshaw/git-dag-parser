@@ -71,7 +71,7 @@ For the meaning of terms such as work unit, worker, and delta family, refer to "
  +---------------------------------------------------------------+
                |
                v
-         ParsedObjects
+          ParseResult
 ```
 
 ### Pass 1: object headers
@@ -182,15 +182,16 @@ After pass 2, `parse_objects` does these steps:
 
 ### Result
 
-`parse_objects` gives a `ParsedObjects` tuple:
+`parse_objects` gives a `ParseResult` struct:
 
-| Item | Contents |
+| Field | Contents |
 |---|---|
-| `HashMap<ObjectHash, CommitRaw>` | The hashes from each commit header. |
-| `TreeEntries` | The entries of all trees. |
-| `NameStore` | The entry names that `TreeEntries` refers to. |
-| `HashIndex` | The `ObjectId` of each hash. |
-| `ObjectContainer` | All objects, copies, pack files, and refs. |
+| `tree_entries` | The entries of all trees. |
+| `names` | The entry names that `tree_entries` refers to. |
+| `hash_index` | The `ObjectId` of each hash. |
+| `container` | All objects, copies, pack files, and refs. |
+
+The `CommitRaw` records are not in the result. After the last steps, each `Commit` has its tree, parents, and commit time as indices and values.
 
 ## Data model
 
@@ -251,7 +252,7 @@ Each version of a directory has the same entry names again. Thus a large history
 
 The `NameStore` keeps one copy of each different name. Each tree entry keeps a 4-byte `NameId` that refers to its name. The `NameStore` uses the `intaglio` symbol table with the `ahash` hash function.
 
-The `NameStore` keeps names as bytes, because Git does not make it necessary for names to be UTF-8. A `NameId` is correct only with the `NameStore` that made it. In pass 2, each worker has its own `NameStore`, and the merge makes one store from them (see "Merge"). Thus `ParsedObjects` keeps the `NameStore` with `TreeEntries`, and `ObjectContainer` does not contain a `NameId`.
+The `NameStore` keeps names as bytes, because Git does not make it necessary for names to be UTF-8. A `NameId` is correct only with the `NameStore` that made it. In pass 2, each worker has its own `NameStore`, and the merge makes one store from them (see "Merge"). Thus `ParseResult` keeps the `NameStore` with `TreeEntries`, and `ObjectContainer` does not contain a `NameId`.
 
 ## Git object formats
 

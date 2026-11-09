@@ -12,7 +12,6 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use tracing::info;
@@ -30,7 +29,7 @@ use crate::size::format_size;
 
 /// Commit headers, tree entries, and the names the entries refer to
 pub struct Bodies {
-    pub commits_raw: HashMap<ObjectHash, CommitRaw>,
+    pub commits_raw: Vec<CommitRaw>,
     /// Every tree's entries, with children resolved to indices
     pub tree_entries: TreeEntries,
     /// The entry names that `tree_entries` refers to
@@ -245,7 +244,7 @@ fn read_loose_unit(
 /// medium allocations is resident.
 #[derive(Default)]
 struct Parsed {
-    commits_raw: Vec<(ObjectHash, CommitRaw)>,
+    commits_raw: Vec<CommitRaw>,
     trees: TreeEntriesBuilder,
     names: NameStore,
     tags: Vec<(usize, TagRaw)>,
@@ -264,7 +263,7 @@ impl Parsed {
             ObjectId::Commit(i) => {
                 let raw =
                     parse_commit(body, i).with_context(|| format!("Bad commit {}", hex(hash)))?;
-                self.commits_raw.push((*hash, raw));
+                self.commits_raw.push(raw);
             }
             ObjectId::Tree(i) => {
                 parse_tree(body, i, &mut self.names, index, &mut self.trees)
@@ -291,7 +290,7 @@ fn merge(
     let start = Instant::now();
     let count = parts.len();
     let mut names = NameStore::new();
-    let mut commits_raw = HashMap::with_capacity(commits);
+    let mut commits_raw = Vec::with_capacity(commits);
     let mut builders = Vec::with_capacity(count);
     let mut maps = Vec::with_capacity(count);
     let mut tags = Vec::new();

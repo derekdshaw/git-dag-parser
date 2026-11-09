@@ -50,7 +50,7 @@ Plans 05 to 09 refer to paths such as `src/parser/...`. This step must update th
 
 ## Coupling to repair before the split
 
-1. **The public API is a tuple of five items.** `src/parser/mod.rs:21`:
+1. **The public API is a tuple of five items.** (Done in plan 4.1 part 8: `parse_objects` returns `ParseResult { tree_entries, names, hash_index, container }`, and `CommitRaw` is not in it. `CommitRaw` is still a `pub` type in `models::container`.) Before that change, `src/parser/mod.rs:21` had:
    ```rust
    pub type ParsedObjects = (
        HashMap<ObjectHash, CommitRaw>,
@@ -82,7 +82,7 @@ Get answers from the user before the work starts:
    - For other projects: do items 3 and 5 of "Coupling to repair" before the first release of the library.
    - Only a boundary: the workspace and items 1, 2, and 4 are sufficient. Items 3 and 5 can wait.
 2. The name and the path of the library crate.
-3. Is `CommitRaw` public (item 1)?
+3. Is `CommitRaw` public (item 1)? It is not in `ParseResult`, so only pass 2 uses it. It can become `pub(crate)` or move to `src/parser/`.
 4. Progress: a callback, or `tracing` events only (item 2)?
 
 ## Work to do
@@ -90,7 +90,7 @@ Get answers from the user before the work starts:
 Do the items in this sequence. Each item is one commit.
 
 1. **Repair items 1, 2, and 4 in the current crate.** No files move.
-   1. Replace `ParsedObjects` with a struct. Update `src/commands/init.rs` and the tests.
+   1. Replace `ParsedObjects` with a struct. Update `src/commands/init.rs` and the tests. (Done in plan 4.1 part 8.)
    2. Remove `indicatif` from `src/parser/`. Show the progress in the binary.
    3. Move `find_git_dir` to `src/repo.rs` (plan 09 fix A). If fix A is already done, skip this item.
    4. Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo clippy --all-targets --features bench -- -D warnings`, and `cargo test`.

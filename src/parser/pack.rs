@@ -1730,7 +1730,11 @@ mod tests {
         pack.write(&dir.path().join("objects/pack"));
         std::fs::write(dir.path().join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
-        let (_, tree_entries, _, _, container) = crate::parser::parse_objects(dir.path()).unwrap();
+        let crate::parser::ParseResult {
+            tree_entries,
+            container,
+            ..
+        } = crate::parser::parse_objects(dir.path()).unwrap();
         assert_eq!(container.trees.len(), n);
         assert_eq!(tree_entries.entry_count(), 0);
 

@@ -331,8 +331,9 @@ fn parse_matches_git_on_real_repositories() {
             }
             None => parse_objects(&git_dir),
         };
-        let (_, _, _, _, container) =
-            parsed.unwrap_or_else(|e| panic!("parse of {repo} failed: {e:#}"));
+        let container = parsed
+            .unwrap_or_else(|e| panic!("parse of {repo} failed: {e:#}"))
+            .container;
 
         let mut out = Vec::new();
         check_objects(&git_dir, &container, &mut out);
