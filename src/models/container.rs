@@ -170,19 +170,6 @@ impl HashIndex {
     }
 }
 
-/// Raw commit data extracted during Phase 1 parsing
-#[derive(Debug)]
-pub struct CommitRaw {
-    /// Index in the ObjectContainer.commits array
-    pub index: usize,
-    /// Hash of the root tree for this commit
-    pub root_tree_hash: ObjectHash,
-    /// Hashes of parent commits (for DAG structure)
-    pub parent_hashes: Vec<ObjectHash>,
-    /// Committer timestamp, seconds since the Unix epoch
-    pub commit_time: i64,
-}
-
 /// Git file mode constants
 pub mod mode {
     pub const TREE: u32 = 0o040000;

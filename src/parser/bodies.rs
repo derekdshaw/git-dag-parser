@@ -16,14 +16,14 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use tracing::info;
 
-use super::content::{parse_commit, parse_tag, parse_tree, TagRaw};
+use super::content::{parse_commit, parse_tag, parse_tree, CommitRaw, TagRaw};
 use super::delta_cache::{pack_reads, DeltaCacheStats};
 use super::loose::read_loose_object;
 use super::pack::PackReader;
 use super::scan::{OpenPack, Scan, Scanned};
 use super::work::{unit_reads, work_units};
 use crate::error::ParseError;
-use crate::models::container::{CommitRaw, HashIndex, ObjectHash, TreeEntries, TreeEntriesBuilder};
+use crate::models::container::{HashIndex, ObjectHash, TreeEntries, TreeEntriesBuilder};
 use crate::models::{NameStore, ObjectId, ObjectKind};
 use crate::size::format_size;
 

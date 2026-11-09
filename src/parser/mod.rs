@@ -14,8 +14,9 @@ use anyhow::Result;
 use indicatif::ProgressBar;
 use tracing::Level;
 
-use crate::models::container::{CommitRaw, HashIndex, TreeEntries};
+use crate::models::container::{HashIndex, TreeEntries};
 use crate::models::{NameStore, ObjectContainer, Ref};
+use content::CommitRaw;
 
 pub use delta_cache::DeltaCacheStats;
 

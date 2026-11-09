@@ -5,8 +5,22 @@
 use anyhow::Result;
 
 use crate::error::ParseError;
-use crate::models::container::{CommitRaw, FileKind, HashIndex, ObjectHash, TreeEntriesBuilder};
+use crate::models::container::{FileKind, HashIndex, ObjectHash, TreeEntriesBuilder};
 use crate::models::NameStore;
+
+/// Fields of a commit body that pass 2 reads. `parse_objects` resolves the
+/// hashes to indices in `Commit`; this type is not part of its result.
+#[derive(Debug)]
+pub(crate) struct CommitRaw {
+    /// Index in the ObjectContainer.commits array
+    pub index: usize,
+    /// Hash of the root tree for this commit
+    pub root_tree_hash: ObjectHash,
+    /// Hashes of parent commits (for DAG structure)
+    pub parent_hashes: Vec<ObjectHash>,
+    /// Committer timestamp, seconds since the Unix epoch
+    pub commit_time: i64,
+}
 
 /// Fields of an annotated tag body
 #[derive(Debug)]

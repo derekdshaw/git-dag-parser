@@ -26,10 +26,10 @@ For the meaning of terms such as work unit, worker, and delta family, refer to "
 | `src/parser/pack.rs` | Pack index files, pack entry headers, zlib streams, deltas, and `PackReader`. |
 | `src/parser/delta_cache.rs` | The delta cache, the request times of the bases, and the simulation of the cache in pass 1. |
 | `src/parser/loose.rs` | Loose object headers and bodies. |
-| `src/parser/content.rs` | The parsers for commit, tree, and tag bodies. |
+| `src/parser/content.rs` | The parsers for commit, tree, and tag bodies, and `CommitRaw`. |
 | `src/parser/refs.rs` | The refs from `packed-refs`, from loose ref files, and from a detached `HEAD`. |
 | `src/models/objects.rs` | `Commit`, `Tree`, `Blob`, `Tag`, `Ref`, `Pack`, `ObjectCopy`, and `ObjectId`. |
-| `src/models/container.rs` | `ObjectContainer`, `HashIndex`, `CommitRaw`, `FileKind`, `TreeEntries`, and `TreeEntriesBuilder`. |
+| `src/models/container.rs` | `ObjectContainer`, `HashIndex`, `FileKind`, `TreeEntries`, and `TreeEntriesBuilder`. |
 | `src/models/name_store.rs` | `NameStore`, `NameId`, and `NameMap`. |
 | `src/error.rs` | The error types. |
 
