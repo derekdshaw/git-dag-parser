@@ -8,6 +8,7 @@ mod scan;
 mod work;
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use indicatif::ProgressBar;
@@ -15,6 +16,8 @@ use tracing::Level;
 
 use crate::models::container::{CommitRaw, HashIndex, TreeEntries};
 use crate::models::{NameStore, ObjectContainer, Ref};
+
+pub use delta_cache::DeltaCacheStats;
 
 /// The result of a parse
 pub struct ParseResult {
@@ -27,6 +30,13 @@ pub struct ParseResult {
     /// Object container, with commit trees and parents, tag targets and refs
     /// resolved to indices
     pub container: ObjectContainer,
+    /// The delta cache counts of pass 2 for each pack, in the order of
+    /// `container.packs`
+    pub delta_cache: Vec<DeltaCacheStats>,
+    /// Time of pass 1 (headers)
+    pub pass1: Duration,
+    /// Time of pass 2 (bodies)
+    pub pass2: Duration,
 }
 
 /// Options of a parse
@@ -60,10 +70,13 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParseResult> {
 ///    pass 1 indexed every object.
 pub fn parse_objects_with(git_dir: &Path, options: &ParseOptions) -> Result<ParseResult> {
     let mut scanned = scan::scan_repository(git_dir)?;
+    let pass1 = scanned.elapsed;
     let bodies::Bodies {
         commits_raw,
         tree_entries,
         names,
+        delta_cache,
+        elapsed: pass2,
     } = bodies::read_bodies(&mut scanned, options.delta_cache_limit)?;
     // Packs are closed here; everything needed is in memory.
     let scan::Scan {
@@ -85,6 +98,9 @@ pub fn parse_objects_with(git_dir: &Path, options: &ParseOptions) -> Result<Pars
         names,
         hash_index,
         container,
+        delta_cache,
+        pass1,
+        pass2,
     })
 }
 

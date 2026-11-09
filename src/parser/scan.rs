@@ -10,7 +10,7 @@
 use std::cmp::Reverse;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
@@ -307,6 +307,8 @@ pub struct Scanned {
     pub scan: Scan,
     pub packs: Vec<OpenPack>,
     pub objects_dir: PathBuf,
+    /// Time of pass 1, without the delta cache simulation
+    pub elapsed: Duration,
 }
 
 /// Pass 1: read every pack index, every pack's headers in offset order, and
@@ -402,6 +404,7 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
     scan.finish();
 
     let c = &scan.container;
+    let elapsed = start.elapsed();
     info!(
         "Pass 1 (headers): C:{} T:{} B:{} t:{} from {} copies on {} threads in {:?}",
         c.commits.len(),
@@ -410,7 +413,7 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
         c.tags.len(),
         c.copies.len(),
         rayon::current_num_threads(),
-        start.elapsed()
+        elapsed
     );
 
     // After the pass 1 time, so that the simulation is not part of it
@@ -451,6 +454,7 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
         scan,
         packs,
         objects_dir,
+        elapsed,
     })
 }
 

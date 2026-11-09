@@ -5,8 +5,7 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use crate::error::DagError;
-use crate::models::{NameStore, ObjectContainer};
-use crate::parser::{self, ParseOptions};
+use crate::parser::{self, DeltaCacheStats, ParseOptions, ParseResult};
 use crate::size::format_size;
 
 /// Run the init command: parse a Git repository and summarize what it holds
@@ -25,12 +24,11 @@ pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
         format_size(options.delta_cache_limit)
     );
     let parse_start = Instant::now();
-    let parser::ParseResult {
-        names, container, ..
-    } = parser::parse_objects_with(&git_dir, options).context("Failed to parse Git objects")?;
+    let parsed =
+        parser::parse_objects_with(&git_dir, options).context("Failed to parse Git objects")?;
     let parse_elapsed = parse_start.elapsed();
 
-    print_summary(&container, &names, parse_elapsed, start.elapsed());
+    print_summary(&parsed, parse_elapsed, start.elapsed());
 
     Ok(())
 }
@@ -70,12 +68,19 @@ fn find_git_dir(repo_path: &Path) -> Result<PathBuf> {
 }
 
 /// Print a summary of the parsed objects
-fn print_summary(
-    container: &ObjectContainer,
-    names: &NameStore,
-    parse: std::time::Duration,
-    total: std::time::Duration,
-) {
+///
+/// `scripts/benchmarks/harness.py` reads the `Parse:` and `Total:` lines of
+/// the timing section, and takes the last `Total:` line. Keep them last.
+fn print_summary(parsed: &ParseResult, parse: std::time::Duration, total: std::time::Duration) {
+    let ParseResult {
+        tree_entries,
+        names,
+        container,
+        delta_cache,
+        pass1,
+        pass2,
+        ..
+    } = parsed;
     println!("\n=== DAG Summary ===");
     println!("Commits: {}", container.commits.len());
     println!("Trees:   {}", container.trees.len());
@@ -93,8 +98,22 @@ fn print_summary(
         names.len(),
         names.total_bytes() as f64 / 1024.0
     );
+    println!("Tree entries: {}", tree_entries.entry_count());
+    let mut cache = DeltaCacheStats::default();
+    for stats in delta_cache {
+        cache.add(stats);
+    }
+    println!(
+        "Delta cache: {} hits, {} misses, {} evictions in {} packs",
+        cache.hits,
+        cache.misses,
+        cache.evictions,
+        delta_cache.len()
+    );
 
     println!("\n=== Timing ===");
+    println!("Pass 1: {:?}", pass1);
+    println!("Pass 2: {:?}", pass2);
     println!("Parse:  {:?}", parse);
     println!("Total:  {:?}", total);
 }
