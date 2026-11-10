@@ -70,13 +70,15 @@ A commit can reach `o` only if `o` is its root tree, or if the commit can reach 
 6. In `owner.rs`, calculate the owner of each tree and blob. Use `rayon` parallel iterators on borrowed data:
    - The workers borrow `&TreeEntries`, the commit ranks, and the `AtomicU32` arrays for owner and in-degree. `rayon` returns only after all workers are done, so the data does not have to be `'static`.
    - Do not use `Arc`, `thread::spawn`, or a channel. The workers write their results with atomic operations. Nothing is sent back, and nothing is merged.
+   - The values must be atomic because many trees contain the same child, and different workers process these trees at the same time. Also, exactly one worker must see the in-degree of a child become 0, so that the child goes into the next frontier one time. Do not give each worker its own arrays and merge them after each round: on 1JS, full arrays are approximately 50 MB for each thread, and they must be merged after each round. Also, a list of `(child, owner)` pairs is approximately 5 GB.
+   - Use `Ordering::Relaxed` for all atomic operations. The `rayon` call of each round returns only after all its workers are done, so all writes of a round are visible to the next round.
    - This calculation does not use the `NameStore`. Do not remove it: step 6 uses it for paths, and step 7 writes the names.
    1. Make `owner: Vec<AtomicU32>` for trees and for blobs. Set each value to `u32::MAX`.
    2. For each commit with a root tree, set `owner[root]` to the minimum of its value and the commit rank (`fetch_min`).
    3. Calculate the in-degree of each tree from `TreeEntries`. Count each entry, also duplicates. Use `Vec<AtomicU32>` and a parallel loop over the trees.
    4. Put all trees with in-degree 0 into the first frontier. This includes trees that no commit reaches.
    5. For each round, process the frontier trees in parallel (`rayon`). For each entry of tree `T`:
-      - Do `owner[child].fetch_min(owner[T])`.
+      - Do `owner[child].fetch_min(owner[T])`. First read `owner[child]` with `load`, and do `fetch_min` only if `owner[T]` is smaller. On x86, `fetch_min` is a `cmpxchg` loop, and it takes the cache line from the other cores. A child that many trees contain usually gets its minimum from the first tree, so most entries then do only a read.
       - A tree with many entries (a large monorepo can have one with approximately 84,000) is a large unit of work. Process its entries in parallel chunks. `entries(tree)` is an iterator, so add a method to `TreeEntries` that gives the `child` and `mode` slices of one tree. `TreeEntries` is in the library (`crates/git-dag-parser-core/src/models/container.rs`), so this method is a change to the library.
       - Tests must use a small chunk size, so that a small tree is cut into chunks. Use two module-level constants side by side, `#[cfg(not(test))]` and `#[cfg(test)]`, as `GATHER_CHUNK` does (`crates/git-dag-parser-core/src/models/container.rs`). A constant inside `mod tests` is not visible to the parent module.
       - If the child is a tree, decrease its in-degree by 1. If the in-degree becomes 0, put the child in the next frontier.
