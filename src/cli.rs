@@ -24,7 +24,7 @@ pub enum Commands {
         /// Byte limit of the delta caches of all threads together, such as
         /// 512mb or 2gb. Each thread gets an equal share. A cache keeps
         /// resolved delta bases while a work unit is read; 0 caches nothing.
-        #[arg(long, value_parser = crate::size::parse_size, default_value = "1gb")]
+        #[arg(long, value_parser = git_dag_parser_core::size::parse_size, default_value = "1gb")]
         delta_cache_size: u64,
     },
 

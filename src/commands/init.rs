@@ -4,9 +4,9 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tracing::info;
 
-use crate::parser::{self, DeltaCacheStats, ParseOptions, ParseResult};
-use crate::repo;
-use crate::size::format_size;
+use git_dag_parser_core::parser::{self, DeltaCacheStats, ParseOptions, ParseResult};
+use git_dag_parser_core::repo;
+use git_dag_parser_core::size::format_size;
 
 /// Run the init command: parse a Git repository and summarize what it holds
 pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {

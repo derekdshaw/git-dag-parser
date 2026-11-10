@@ -1,12 +1,10 @@
-mod common;
-
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::{count_by_kind, hex, parsed_objects, Repo};
-use git_dag_parser::models::ObjectId;
-use git_dag_parser::parser::{parse_objects, parse_objects_with, ParseOptions, ParseResult};
+use git_dag_parser_core::models::ObjectId;
+use git_dag_parser_core::parser::{parse_objects, parse_objects_with, ParseOptions, ParseResult};
+use test_fixtures::{count_by_kind, hex, parsed_objects, Repo};
 
 #[test]
 fn every_object_matches_git_type_and_sizes() {
@@ -368,7 +366,9 @@ fn objects_are_in_hash_order() {
 }
 
 /// Hash to object id for every object in a container
-fn ids_by_hash(container: &git_dag_parser::models::ObjectContainer) -> HashMap<String, ObjectId> {
+fn ids_by_hash(
+    container: &git_dag_parser_core::models::ObjectContainer,
+) -> HashMap<String, ObjectId> {
     let mut ids = HashMap::new();
     for o in &container.commits {
         ids.insert(hex(&o.hash), ObjectId::Commit(o.index));

@@ -25,7 +25,7 @@ pub use delta_cache::DeltaCacheStats;
 ///   the work
 /// - `done`: the number of bodies read since the last event
 /// - `finish`: `true` at the end
-pub const PROGRESS_TARGET: &str = "git_dag_parser::progress";
+pub const PROGRESS_TARGET: &str = "git_dag_parser_core::progress";
 
 /// The result of a parse
 pub struct ParseResult {
@@ -153,7 +153,7 @@ mod benches {
     /// A full parse of a real repository. Ignored by default because it
     /// needs a repository and takes seconds per run:
     ///
-    /// `GDP_BENCH_REPO=/path/to/zed.git cargo bench --features bench --bench parser -- --include-ignored parse_objects_repo`
+    /// `GDP_BENCH_REPO=/path/to/zed.git cargo bench -p git-dag-parser-core --features bench --bench parser -- --include-ignored parse_objects_repo`
     ///
     /// `docs/benchmarks/README.md` gives the zed commit to use.
     ///

@@ -1,11 +1,9 @@
-mod common;
-
 use std::collections::HashMap;
 use std::fs;
 
-use common::{hex, CommitInfo, Repo};
-use git_dag_parser::models::{ObjectId, RefKind};
-use git_dag_parser::parser::parse_objects;
+use git_dag_parser_core::models::{ObjectId, RefKind};
+use git_dag_parser_core::parser::parse_objects;
+use test_fixtures::{hex, CommitInfo, Repo};
 
 #[test]
 fn commit_trees_parents_and_times_match_git() {

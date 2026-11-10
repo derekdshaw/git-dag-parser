@@ -1,7 +1,8 @@
 mod progress;
 
 use clap::Parser;
-use git_dag_parser::{cli, commands, parser};
+use git_dag_parser::{cli, commands};
+use git_dag_parser_core::parser;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 

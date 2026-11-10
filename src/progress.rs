@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 
-use git_dag_parser::parser::PROGRESS_TARGET;
+use git_dag_parser_core::parser::PROGRESS_TARGET;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};

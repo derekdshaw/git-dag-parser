@@ -1,9 +1,6 @@
 //! Test fixtures: small repositories built with the git CLI, and git's own
 //! view of their object store to compare the parser against.
 
-// Each test binary uses a different subset of these helpers.
-#![allow(dead_code)]
-
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -12,8 +9,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use git_dag_parser::models::container::ObjectHash;
-use git_dag_parser::models::ObjectContainer;
+use git_dag_parser_core::models::container::ObjectHash;
+use git_dag_parser_core::models::ObjectContainer;
 use tempfile::TempDir;
 
 /// Type and sizes of one object, as reported by `git cat-file --batch-check`.
@@ -41,6 +38,8 @@ pub struct Repo {
 }
 
 impl Repo {
+    // No `Default`: each call makes a new repository with git
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let tmp = TempDir::new().unwrap();
         let work = tmp.path().join("repo");
