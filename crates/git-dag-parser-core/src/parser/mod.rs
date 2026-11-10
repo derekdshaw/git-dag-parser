@@ -11,13 +11,21 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use indicatif::ProgressBar;
-use tracing::Level;
 
-use crate::models::container::{CommitRaw, HashIndex, TreeEntries};
+use crate::models::container::{HashIndex, TreeEntries};
 use crate::models::{NameStore, ObjectContainer, Ref};
+use content::CommitRaw;
 
 pub use delta_cache::DeltaCacheStats;
+
+/// Target of the `info` events that report the progress of pass 2. The
+/// parser draws no progress bar; a subscriber can draw one from these
+/// events. Their fields:
+/// - `total`: the number of bodies to read, at the start; the message names
+///   the work
+/// - `done`: the number of bodies read since the last event
+/// - `finish`: `true` at the end
+pub const PROGRESS_TARGET: &str = "git_dag_parser_core::progress";
 
 /// The result of a parse
 pub struct ParseResult {
@@ -112,17 +120,6 @@ pub fn default_threads(hardware: usize) -> usize {
     (hardware / 4).max(hardware.saturating_sub(1).min(8)).max(1)
 }
 
-/// A progress bar of `len` steps that draws only when info logging is on.
-/// Progress is reported through the program's logger like the other
-/// messages, so a caller with no logger, such as the benchmarks, sees none.
-fn progress_bar(len: u64) -> ProgressBar {
-    if tracing::enabled!(Level::INFO) {
-        ProgressBar::new(len)
-    } else {
-        ProgressBar::hidden()
-    }
-}
-
 /// Resolve each commit's root tree and parents to indices
 fn resolve_commits(
     commits_raw: &[CommitRaw],
@@ -156,7 +153,7 @@ mod benches {
     /// A full parse of a real repository. Ignored by default because it
     /// needs a repository and takes seconds per run:
     ///
-    /// `GDP_BENCH_REPO=/path/to/zed.git cargo bench --features bench --bench parser -- --include-ignored parse_objects_repo`
+    /// `GDP_BENCH_REPO=/path/to/zed.git cargo bench -p git-dag-parser-core --features bench --bench parser -- --include-ignored parse_objects_repo`
     ///
     /// `docs/benchmarks/README.md` gives the zed commit to use.
     ///

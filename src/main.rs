@@ -1,6 +1,10 @@
+mod progress;
+
 use clap::Parser;
-use git_dag_parser::{cli, commands, parser};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use git_dag_parser::{cli, commands};
+use git_dag_parser_core::parser;
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 // glibc malloc slows down when pass 2 frees delta cache entries of many
 // sizes in mixed order: linux went from 204 s to 335 s with the 3b cache.
@@ -29,12 +33,18 @@ fn main() -> anyhow::Result<()> {
     // mimalloc allows this at any time.
     unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
 
-    // Initialize tracing
+    // Initialize tracing. The filter applies to all layers, so below the
+    // info level there is no progress bar. The progress events go to the
+    // bar only, not to the log.
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
         ))
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_filter(filter_fn(|m| m.target() != parser::PROGRESS_TARGET)),
+        )
+        .with(progress::ProgressLayer::default())
         .init();
 
     let cli = cli::Cli::parse();

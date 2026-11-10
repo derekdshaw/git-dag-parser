@@ -1,12 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use tracing::info;
 
-use crate::error::DagError;
-use crate::parser::{self, DeltaCacheStats, ParseOptions, ParseResult};
-use crate::size::format_size;
+use git_dag_parser_core::parser::{self, DeltaCacheStats, ParseOptions, ParseResult};
+use git_dag_parser_core::repo;
+use git_dag_parser_core::size::format_size;
 
 /// Run the init command: parse a Git repository and summarize what it holds
 pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
@@ -15,7 +15,7 @@ pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
     info!("Initializing DAG from repository: {}", repo_path.display());
 
     // Validate repository
-    let git_dir = find_git_dir(repo_path)?;
+    let git_dir = repo::find_git_dir(repo_path)?;
     info!("Found .git directory: {}", git_dir.display());
 
     // Parse all objects from pack files and loose objects
@@ -31,40 +31,6 @@ pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
     print_summary(&parsed, parse_elapsed, start.elapsed());
 
     Ok(())
-}
-
-/// Find the .git directory for a repository
-fn find_git_dir(repo_path: &Path) -> Result<PathBuf> {
-    let git_dir = repo_path.join(".git");
-
-    if git_dir.is_dir() {
-        return Ok(git_dir);
-    }
-
-    // Check if repo_path itself is a bare repository
-    if repo_path.join("objects").is_dir() && repo_path.join("refs").is_dir() {
-        return Ok(repo_path.to_path_buf());
-    }
-
-    // Check if .git is a file (worktree)
-    if git_dir.is_file() {
-        let content = std::fs::read_to_string(&git_dir).context("Failed to read .git file")?;
-
-        if let Some(path) = content.strip_prefix("gitdir: ") {
-            let path = path.trim();
-            let resolved = if Path::new(path).is_absolute() {
-                PathBuf::from(path)
-            } else {
-                repo_path.join(path)
-            };
-
-            if resolved.is_dir() {
-                return Ok(resolved);
-            }
-        }
-    }
-
-    Err(DagError::NotAGitRepo(repo_path.display().to_string()).into())
 }
 
 /// Print a summary of the parsed objects

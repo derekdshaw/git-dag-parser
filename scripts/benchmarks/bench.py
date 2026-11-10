@@ -5,7 +5,8 @@ so this script saves the raw table with run details and a parsed JSON copy.
 
 Usage:
   bench.py run [--repo PATH] [--label NAME] [-- DIVAN_ARGS...]
-      Run `cargo bench --features bench --bench parser` in the repository and
+      Run `cargo bench -p git-dag-parser-core --features bench --bench parser`
+      in the repository and
       save <out>/<UTC time>-<commit>[-dirty][-label].txt and .json.
   bench.py parse FILE.txt
       Parse a saved table and print the JSON.
@@ -148,7 +149,7 @@ def run(args: argparse.Namespace) -> None:
         "label": args.label,
         "divan_args": args.divan_args,
     }
-    cmd = ["cargo", "bench", "--features", "bench", "--bench", "parser", "--", "--color", "never", *args.divan_args]
+    cmd = ["cargo", "bench", "-p", "git-dag-parser-core", "--features", "bench", "--bench", "parser", "--", "--color", "never", *args.divan_args]
     proc = subprocess.run(cmd, cwd=repo, capture_output=True, text=True)
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)

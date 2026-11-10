@@ -1,12 +1,23 @@
+[workspace]
+members = ["crates/git-dag-parser-core", "crates/test-fixtures"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
 [package]
 name = "git-dag-parser"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
+edition.workspace = true
+rust-version.workspace = true
 description = "Fast Git DAG parser that directly reads Git object store to build relationship graphs"
-license = "MIT"
+license.workspace = true
 
 [dependencies]
+# Parser library
+git-dag-parser-core = { path = "crates/git-dag-parser-core" }
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 
@@ -24,41 +35,12 @@ indicatif = "0.17"
 # Concurrency
 rayon = "1.10"
 
-# Memory mapping
-memmap2 = "0.9"
-
-# Compression
-flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
-
-# Fast hashing
-ahash = "0.8"
-hashbrown = "0.14"
-
-# Path name interning
-intaglio = { version = "1.15", default-features = false, features = ["bytes"] }
-
-# CPU count
-num_cpus = "1.17"
-
 # Global allocator of the binary (src/main.rs), and its options
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 
-# Benchmarks (`cargo bench --features bench`). A regular optional dependency,
-# not a dev-dependency: the benchmarks live in the library next to the code
-# they measure, and the library is not built in test mode for benches.
-divan = { version = "0.1", optional = true }
-
-[features]
-bench = ["dep:divan"]
-
 [dev-dependencies]
-tempfile = "3"
-
-[[bench]]
-name = "parser"
-harness = false
-required-features = ["bench"]
+test-fixtures = { path = "crates/test-fixtures" }
 
 [profile.release]
 opt-level = 3

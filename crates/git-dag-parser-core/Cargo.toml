@@ -1,0 +1,50 @@
+[package]
+name = "git-dag-parser-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Reads the Git object store and builds the resolved object graph of a repository"
+license.workspace = true
+publish = false
+
+[dependencies]
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+
+# Concurrency
+rayon = "1.10"
+
+# Memory mapping
+memmap2 = "0.9"
+
+# Compression
+flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
+
+# Fast hashing
+ahash = "0.8"
+hashbrown = "0.14"
+
+# Path name interning
+intaglio = { version = "1.15", default-features = false, features = ["bytes"] }
+
+# Benchmarks (`cargo bench -p git-dag-parser-core --features bench`). A
+# regular optional dependency, not a dev-dependency: the benchmarks live in
+# the library next to the code they measure, and the library is not built
+# in test mode for benches.
+divan = { version = "0.1", optional = true }
+
+[features]
+bench = ["dep:divan"]
+
+[dev-dependencies]
+tempfile = "3"
+test-fixtures = { path = "../test-fixtures" }
+
+[[bench]]
+name = "parser"
+harness = false
+required-features = ["bench"]

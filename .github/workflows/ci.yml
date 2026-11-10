@@ -40,16 +40,16 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --workspace --verbose
 
       - name: Test
-        run: cargo test --verbose
+        run: cargo test --workspace --verbose
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Format check
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
   bench:
     # The benchmark modules compile only with the `bench` feature, so no other
@@ -76,7 +76,7 @@ jobs:
           key: ${{ runner.os }}-bench-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Clippy (bench)
-        run: cargo clippy --all-targets --features bench -- -D warnings
+        run: cargo clippy --workspace --all-targets --features bench -- -D warnings
 
   version:
     name: Read version

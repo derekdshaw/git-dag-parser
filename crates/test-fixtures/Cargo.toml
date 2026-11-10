@@ -1,0 +1,12 @@
+[package]
+name = "test-fixtures"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Test repositories built with the git CLI, for the tests of the workspace"
+license.workspace = true
+publish = false
+
+[dependencies]
+git-dag-parser-core = { path = "../git-dag-parser-core" }
+tempfile = "3"

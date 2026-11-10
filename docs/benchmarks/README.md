@@ -6,7 +6,7 @@ This folder keeps benchmark results so that changes can be compared with earlier
 
 ## Micro benchmarks (`cargo bench`)
 
-The benchmarks use [divan](https://docs.rs/divan). Each one is defined next to the code it measures, in a `#[cfg(feature = "bench")] mod benches` block, so it can call private functions. `benches/parser.rs` runs them and installs divan's allocation profiler, which reports allocations, reallocations, and bytes for each iteration.
+The benchmarks use [divan](https://docs.rs/divan). Each one is defined next to the code it measures, in a `#[cfg(feature = "bench")] mod benches` block, so it can call private functions. `crates/git-dag-parser-core/benches/parser.rs` runs them and installs divan's allocation profiler, which reports allocations, reallocations, and bytes for each iteration.
 
 | Benchmark | Measures |
 |---|---|
@@ -28,9 +28,9 @@ The inputs are synthetic and are checked once before timing. `parse_objects_repo
 For `parse_objects_repo`, use zed at the commit in "Repositories" (below). If you use a different repository or a different commit, you cannot compare the `parse_objects_repo` results with the runs in this folder.
 
 ```
-cargo bench --features bench --bench parser                       # all micro benchmarks
-cargo bench --features bench --bench parser -- decompress_data    # only names that match
-GDP_BENCH_REPO=<repo> cargo bench --features bench --bench parser -- --include-ignored parse_objects_repo
+cargo bench -p git-dag-parser-core --features bench --bench parser                       # all micro benchmarks
+cargo bench -p git-dag-parser-core --features bench --bench parser -- decompress_data    # only names that match
+GDP_BENCH_REPO=<repo> cargo bench -p git-dag-parser-core --features bench --bench parser -- --include-ignored parse_objects_repo
 ```
 
 The library reports progress through `tracing`. The benchmark binary does not install a subscriber, so benchmark output has no progress lines.
@@ -58,7 +58,7 @@ How to read a comparison:
 The benchmarks and the oracle test use real repositories. These repositories are not in this project. Get them, then give their paths in these environment variables:
 
 - `GDP_BENCH_REPO`: the repository for `parse_objects_repo`. Use zed at the commit below.
-- `GDP_ORACLE_REPOS`: the repositories for `tests/git_oracle.rs`, separated by `:`.
+- `GDP_ORACLE_REPOS`: the repositories for `crates/git-dag-parser-core/tests/git_oracle.rs`, separated by `:`.
 
 ### zed for `parse_objects_repo`
 
@@ -91,7 +91,7 @@ To compare the parse with git on these repositories, use this command:
 
 ```
 GDP_ORACLE_REPOS=/path/to/zed:/path/to/vscode:/path/to/git-ms \
-    cargo test --release --test git_oracle -- --ignored --nocapture
+    cargo test --release -p git-dag-parser-core --test git_oracle -- --ignored --nocapture
 ```
 
 ## Whole-program measurements

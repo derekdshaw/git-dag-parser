@@ -17,7 +17,8 @@ For the meaning of terms such as work unit, worker, and delta family, refer to "
 |---|---|
 | `src/main.rs` | Sets the memory allocator, the log level, and the number of threads. Then it runs the command. |
 | `src/cli.rs` | The command-line arguments (`clap`). |
-| `src/commands/init.rs` | The `init` command. It finds the Git directory, parses the objects, and shows the summary. |
+| `src/commands/init.rs` | The `init` command. It finds the Git directory with `find_git_dir`, parses the objects, and shows the summary. |
+| `src/repo.rs` | `find_git_dir`, which finds the Git directory of a repository. |
 | `src/commands/analyze.rs`, `src/commands/query.rs` | Commands that show only a message at this time. |
 | `src/parser/mod.rs` | `parse_objects`: pass 1, pass 2, and the last steps. |
 | `src/parser/scan.rs` | Pass 1. |
@@ -26,10 +27,10 @@ For the meaning of terms such as work unit, worker, and delta family, refer to "
 | `src/parser/pack.rs` | Pack index files, pack entry headers, zlib streams, deltas, and `PackReader`. |
 | `src/parser/delta_cache.rs` | The delta cache, the request times of the bases, and the simulation of the cache in pass 1. |
 | `src/parser/loose.rs` | Loose object headers and bodies. |
-| `src/parser/content.rs` | The parsers for commit, tree, and tag bodies. |
+| `src/parser/content.rs` | The parsers for commit, tree, and tag bodies, and `CommitRaw`. |
 | `src/parser/refs.rs` | The refs from `packed-refs`, from loose ref files, and from a detached `HEAD`. |
 | `src/models/objects.rs` | `Commit`, `Tree`, `Blob`, `Tag`, `Ref`, `Pack`, `ObjectCopy`, and `ObjectId`. |
-| `src/models/container.rs` | `ObjectContainer`, `HashIndex`, `CommitRaw`, `FileKind`, `TreeEntries`, and `TreeEntriesBuilder`. |
+| `src/models/container.rs` | `ObjectContainer`, `HashIndex`, `FileKind`, `TreeEntries`, and `TreeEntriesBuilder`. |
 | `src/models/name_store.rs` | `NameStore`, `NameId`, and `NameMap`. |
 | `src/error.rs` | The error types. |
 

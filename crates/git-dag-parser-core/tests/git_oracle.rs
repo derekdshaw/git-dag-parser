@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! GDP_ORACLE_REPOS=/path/to/zed:/path/to/vscode \
-//!     cargo test --release --test git_oracle -- --ignored --nocapture
+//!     cargo test --release -p git-dag-parser-core --test git_oracle -- --ignored --nocapture
 //! ```
 //!
 //! Paths are separated by `:`. Each one can be a work tree or a `.git`
@@ -16,17 +16,15 @@
 //! the parse uses the default limit. A small limit checks the parse with
 //! evictions.
 
-mod common;
-
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use common::{hex, parsed_objects};
-use git_dag_parser::models::{ObjectContainer, RefKind};
-use git_dag_parser::parser::{parse_objects, parse_objects_with, ParseOptions};
-use git_dag_parser::size::{format_size, parse_size};
+use git_dag_parser_core::models::{ObjectContainer, RefKind};
+use git_dag_parser_core::parser::{parse_objects, parse_objects_with, ParseOptions};
+use git_dag_parser_core::size::{format_size, parse_size};
+use test_fixtures::{hex, parsed_objects};
 
 /// Mismatches shown for each check before the rest are only counted
 const SHOW: usize = 10;
