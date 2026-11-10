@@ -9,6 +9,8 @@ This step moves the code that parses the Git object store into its own library c
 - The calculations on the graph (rank, owner, paths, reachability, SQLite, reports) stay in the application.
 - Do this step after step 4.1 part 3b and before step 5. Then `src/attribution/` (step 5) starts on the correct side of the boundary.
 
+All items are done (2026-11-10): items 1 and 2 in PR #17, item 3 in the pull request after it. See "Result of this step".
+
 ## Project and status before this step
 
 Lines per file (2026-11-01):
@@ -103,6 +105,16 @@ Do the items in this sequence. Each item is one commit.
 3. **Update the plans and the documents.**
    1. Update the paths in plans 05 to 09.
    2. Update `README.md` and `ARCHITECTURE.md`. Write them in ASD-STE100 Simplified Technical English, the same as the current files.
+
+## Result of this step
+
+- The parser is the library crate `git-dag-parser-core` in `crates/git-dag-parser-core`. The program stays at the root. The `Repo` fixtures are in `crates/test-fixtures` (not published).
+- `CommitRaw` is `pub(crate)` in `src/parser/content.rs` of the library.
+- The library does not use `indicatif`. Pass 2 sends `tracing` events with the target `PROGRESS_TARGET`, one for each work unit. The program draws the bar in `ProgressLayer` (`src/progress.rs`).
+- `find_git_dir` is in `src/repo.rs` of the library. `NotAGitRepo` moved from `DagError` to `ParseError`.
+- The unused dependency `num_cpus` is removed.
+- `cargo test --workspace` runs 172 tests, the same number as before the move. The `init` summary on vscode is the same before and after the move. On vscode (3 runs each), parse was 1.21–1.86 s before and 1.29–1.53 s after the move, and pass 2 was 0.357–0.365 s before and 0.343–0.378 s after. The times are the same within the noise. The oracle passes on zed. CI passes on Linux, macOS, and Windows, and `build-release` passes for all five targets.
+- Plans 05 to 09 use the new paths. Also, the results of steps 5 and 6 (rank, owner, paths, liveness) are arrays in structs of the program, not fields of the library types.
 
 ## Tests
 

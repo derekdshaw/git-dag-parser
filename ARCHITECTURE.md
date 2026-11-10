@@ -11,15 +11,36 @@ After the two passes, the parser connects commits, tags, and refs to the objects
 
 For the meaning of terms such as work unit, worker, and delta family, refer to "Terms" in [README.md](README.md).
 
+## Crates
+
+The repository is a Cargo workspace with three crates:
+
+| Crate | Path | Contents |
+|---|---|---|
+| `git-dag-parser` | The root | The program: the command-line arguments, the commands, the progress bar, and `DagError`. |
+| `git-dag-parser-core` | `crates/git-dag-parser-core` | The parser library: the parser, the data model, `find_git_dir`, the byte sizes, `ParseError`, and the benchmarks. |
+| `test-fixtures` | `crates/test-fixtures` | The `Repo` test fixtures: small repositories that the tests make with `git`, and the output of `git` for them. Cargo does not publish this crate. The other two crates use it only in their tests. |
+
+The library reads the object store and gives the object graph: all objects, and the edges from commits, tags, refs, and tree entries to other objects, as indices. The calculations on this graph go in the program. The library does not draw progress bars, and it does not set the memory allocator or the number of threads. The program does these things.
+
 ## Source files
+
+The program, at the root:
 
 | File | Contents |
 |---|---|
-| `src/main.rs` | Sets the memory allocator, the log level, and the number of threads. Then it runs the command. |
+| `src/main.rs` | Sets the memory allocator, the log output, and the number of threads. Then it runs the command. |
 | `src/cli.rs` | The command-line arguments (`clap`). |
+| `src/progress.rs` | `ProgressLayer`, which draws the progress bar of pass 2 from the progress events of the library. |
 | `src/commands/init.rs` | The `init` command. It finds the Git directory with `find_git_dir`, parses the objects, and shows the summary. |
-| `src/repo.rs` | `find_git_dir`, which finds the Git directory of a repository. |
 | `src/commands/analyze.rs`, `src/commands/query.rs` | Commands that show only a message at this time. |
+| `src/error.rs` | `DagError`. |
+
+The library, in `crates/git-dag-parser-core`:
+
+| File | Contents |
+|---|---|
+| `src/repo.rs` | `find_git_dir`, which finds the Git directory of a repository. |
 | `src/parser/mod.rs` | `parse_objects`: pass 1, pass 2, and the last steps. |
 | `src/parser/scan.rs` | Pass 1. |
 | `src/parser/bodies.rs` | Pass 2: the work queue, the workers, and the merge of their results. |
@@ -32,7 +53,9 @@ For the meaning of terms such as work unit, worker, and delta family, refer to "
 | `src/models/objects.rs` | `Commit`, `Tree`, `Blob`, `Tag`, `Ref`, `Pack`, `ObjectCopy`, and `ObjectId`. |
 | `src/models/container.rs` | `ObjectContainer`, `HashIndex`, `FileKind`, `TreeEntries`, and `TreeEntriesBuilder`. |
 | `src/models/name_store.rs` | `NameStore`, `NameId`, and `NameMap`. |
-| `src/error.rs` | The error types. |
+| `src/size.rs` | Byte sizes on the command line and in messages. |
+| `src/error.rs` | `ParseError`. |
+| `benches/parser.rs` | Runs the benchmarks (see "Tests"). |
 
 ## Parse sequence
 
@@ -128,6 +151,16 @@ Each worker keeps its results in its own `Parsed`: the `CommitRaw` records, the 
 
 `main.rs` sets the number of threads (`parser::default_threads`): a quarter of the hardware threads, but up to 8 on a small computer, and always one fewer than the computer has. On 128 hardware threads, pass 2 is not faster with more than about 32 threads, and each thread adds to the peak memory. The `RAYON_NUM_THREADS` environment variable sets a different number.
 
+#### Progress
+
+Pass 2 sends its progress as `tracing` events at the `info` level, with the target `PROGRESS_TARGET` (`git_dag_parser_core::progress`):
+
+- At the start, one event with the number of reads (`total`).
+- After each work unit, one event with the number of reads of the unit (`done`).
+- At the end, one event with `finish`.
+
+Pass 2 sends one event for each unit, not for each read, because tens of millions of events make pass 2 slower. The program draws the progress bar from these events (`ProgressLayer`). The log does not show these events. If the log level is lower than `info`, the program does not get the events, and it does not show a progress bar. Pass 1 does not send progress events.
+
 #### Pack reader and delta cache
 
 For each pack unit, the worker makes a `PackReader`. The reader has one zlib decoder. It resets the decoder for each entry, and it allocates the output one time, with the size from the entry header. If the entry is a delta, `PackReader` makes the base object and applies the delta to it. `PackReader` keeps the base objects in a delta cache (`DeltaCache`):
@@ -166,7 +199,7 @@ A worker reads the trees in unit sequence, not in index sequence. Its `TreeEntri
 After all workers are done, `merge` puts their results together:
 
 1. `NameStore::merge` puts the names of each worker's store in one store, in worker sequence. For each worker, it gives a `NameMap` from the worker's `NameId` values to the `NameId` values of the merged store.
-2. The `CommitRaw` records go into one `HashMap`, and the tag names and targets go into the `Tag` objects.
+2. The `CommitRaw` records of all workers go into one array, and the tag names and targets go into the `Tag` objects.
 3. `TreeEntries::merge` puts the entries of all workers in tree index sequence. It changes each `NameId` to the merged `NameId` in the same step. It does this for one array at a time, and it releases the worker arrays after it copies them. This decreases the maximum memory. It copies each array in parallel, in runs of about one million entries.
 
 The `NameId` of a name can be different from one parse to the next, because it depends on which worker found the name first. The tree entries are the same for each parse and each number of threads.
@@ -191,6 +224,8 @@ After pass 2, `parse_objects` does these steps:
 | `names` | The entry names that `tree_entries` refers to. |
 | `hash_index` | The `ObjectId` of each hash. |
 | `container` | All objects, copies, pack files, and refs. |
+| `delta_cache` | The delta cache hits, misses, and evictions of pass 2 for each pack, in the sequence of `container.packs`. |
+| `pass1`, `pass2` | The time of pass 1 and of pass 2. |
 
 The `CommitRaw` records are not in the result. After the last steps, each `Commit` has its tree, parents, and commit time as indices and values.
 
@@ -346,16 +381,16 @@ The parser reads the `object` and `tag` lines.
 
 ## Errors
 
-The parser uses `anyhow` errors. For most incorrect data in the object store, the error is a `ParseError` (`thiserror`). The two passes and the commands add the object hash or the file name to each error.
+The library and the program use `anyhow` errors. For most incorrect data in the object store, the error is a `ParseError` (`thiserror`) of the library. If `find_git_dir` finds no Git directory, the error is also a `ParseError`. The two passes and the commands add the object hash or the file name to each error. `DagError` is for the errors of the program.
 
 ## Tests
 
 The tests are at three levels:
 
 - Unit tests are in `#[cfg(test)]` modules in the source files. They use data that the test makes.
-- Integration tests in `tests/` make small repositories with `git`. They compare the result of the parser with the output of `git`.
+- Integration tests in `crates/git-dag-parser-core/tests/` make small repositories with `git`, with the `Repo` fixtures of `crates/test-fixtures`. They compare the result of the parser with the output of `git`.
 - The `git_oracle` test parses large repositories and compares the result with `git`. It runs only when you tell Cargo to run it.
 
 The CI workflow runs the unit tests and the integration tests on Linux, macOS, and Windows. It does not run `git_oracle` or the benchmarks.
 
-The benchmarks are in `#[cfg(feature = "bench")]` modules in the source files. For more data, refer to [docs/benchmarks/README.md](docs/benchmarks/README.md).
+The benchmarks are in `#[cfg(feature = "bench")]` modules in the source files of the library. For more data, refer to [docs/benchmarks/README.md](docs/benchmarks/README.md).
