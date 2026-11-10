@@ -10,11 +10,12 @@ This step writes the graph to a SQLite database file.
 
 ## Project and status before this step
 
-- Repository: this repository (Rust, binary and library crate).
+- Repository: this repository, a Cargo workspace (step 11). The binary crate `git-dag-parser` is at the root. The parser library `git-dag-parser-core` is in `crates/git-dag-parser-core`. The `Repo` test fixtures are in `crates/test-fixtures`.
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
-- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 5 (commit rank and owner), 6 (paths, reflogs, liveness).
-- The in-memory model is in `src/models/`. Each container index is in hash order, so the row ids do not change between runs on the same repository.
-- The parse result struct (step 4.1, part 8) holds `ObjectContainer`, `TreeEntries`, the `NameStore`, and the paths (step 6). `ObjectContainer` does not hold a `NameId`.
+- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 5 (commit rank and owner), 6 (paths, reflogs, liveness), 10 (CI and releases), 11 (parser library crate).
+- The in-memory model of the parse is in `crates/git-dag-parser-core/src/models/`. Each container index is in hash order, so the row ids do not change between runs on the same repository.
+- The parse result struct (step 4.1, part 8) holds `ObjectContainer`, `TreeEntries`, and the `NameStore`. `ObjectContainer` does not hold a `NameId`.
+- The results of steps 5 and 6 are structs of the application crate: `Attribution` (corrected date, rank, owner commit), the paths struct (path table and path of each tree and blob), and the liveness arrays.
 
 ## Decision needed before this step
 
@@ -136,8 +137,8 @@ Add indexes after the data is in the tables:
 
 ## Work to do
 
-1. Add `rusqlite` with the `bundled` feature to `Cargo.toml`.
-2. Make `src/store/mod.rs` with `write_database(parsed, path) -> Result<()>`. `parsed` is the parse result struct (step 4.1, part 8). The container alone is not sufficient: the names, the paths, and `TreeEntries` are not in it. Export the function from `src/lib.rs`.
+1. Add `rusqlite` with the `bundled` feature to the root `Cargo.toml` (the application crate).
+2. Make `src/store/mod.rs` in the application crate with `write_database(...) -> Result<()>`. It takes the parse result struct (step 4.1, part 8), the result structs of steps 5 and 6, and the output path. The container alone is not sufficient: the names and `TreeEntries` are in the parse result, and the owners, the paths, and the liveness are in the result structs. Export the function from the root `src/lib.rs`.
 3. Put the schema in one SQL string or file. Run it with `execute_batch`.
 4. Write all rows in one transaction. Use prepared statements.
 5. Set `PRAGMA journal_mode = OFF` and `PRAGMA synchronous = OFF` for the write. The tool makes the file again on each run, so a failed write is not a problem.
@@ -154,7 +155,7 @@ Unit tests (in `src/store/mod.rs`):
 - Write a small hand-made parse result to an in-memory database (`Connection::open_in_memory`). Read each table back. Make sure that each row has the correct values.
 - The `objects` view returns all four types.
 
-Integration tests (in `tests/`, with `Repo` fixtures):
+Integration tests (in the root `tests/`, with `Repo` fixtures from `crates/test-fixtures`):
 
 - Run the full `init` on a fixture. Open the database.
 - The row count of each table equals the container count, and equals the git count for objects.
@@ -177,7 +178,7 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 - Do one step in one commit.
 - Show the diff to the user before the commit. Do not commit until the user approves.
 - Do not put a "Co-Authored-By" line or other tagline in the commit message.
-- Put unit tests in the source file. Put tests that use real git repositories in `tests/`.
+- Put unit tests in the source file. Put tests that use real git repositories in the `tests/` folder of the crate that has the code: `tests/` at the root for the application, `crates/git-dag-parser-core/tests/` for the parser. Both use the `Repo` fixtures of `crates/test-fixtures`.
 - Update `README.md` and `ARCHITECTURE.md` to match the code after this step. Write them in ASD-STE100 Simplified Technical English, the same as the current files.
 - At the end, tell the user what this step does and what the next step is.
 

@@ -16,10 +16,10 @@ This step adds the reports that answer the main question of the tool: "Why is th
 
 ## Project and status before this step
 
-- Repository: this repository (Rust, binary and library crate).
+- Repository: this repository, a Cargo workspace (step 11). The binary crate `git-dag-parser` is at the root. The parser library `git-dag-parser-core` is in `crates/git-dag-parser-core`. The `Repo` test fixtures are in `crates/test-fixtures`.
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
-- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 5 (commit rank and owner), 6 (paths, reflogs, liveness), 7 (SQLite output).
-- The database schema is in `src/store/` (step 7). Important tables: `trees`, `blobs`, `commits`, `paths`, `packs`, `object_copies`, `reflog_entries`, `refs`.
+- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 5 (commit rank and owner), 6 (paths, reflogs, liveness), 7 (SQLite output), 10 (CI and releases), 11 (parser library crate).
+- The database schema is in `src/store/` of the application crate (step 7). `src/reports/` of this step goes in the application crate too. Important tables: `trees`, `blobs`, `commits`, `paths`, `packs`, `object_copies`, `reflog_entries`, `refs`.
 
 ## Words used in this plan
 
@@ -80,7 +80,7 @@ Unit tests (in the `src/reports/` files):
 - The savings range for one object with three copies of sizes 10, 20, and 30 is low 30 and high 50.
 - Keep packs give no savings.
 
-Integration tests (in `tests/`, with `Repo` fixtures):
+Integration tests (in the root `tests/`, with `Repo` fixtures from `crates/test-fixtures`):
 
 - Make a fixture with known bloat: a directory with many files and many small changes, and one large blob.
 - Report 1 shows that directory first. Report 3 shows the large blob, its commit, and its path.
@@ -108,7 +108,7 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 - Do one step in one commit.
 - Show the diff to the user before the commit. Do not commit until the user approves.
 - Do not put a "Co-Authored-By" line or other tagline in the commit message.
-- Put unit tests in the source file. Put tests that use real git repositories in `tests/`.
+- Put unit tests in the source file. Put tests that use real git repositories in the `tests/` folder of the crate that has the code: `tests/` at the root for the application, `crates/git-dag-parser-core/tests/` for the parser. Both use the `Repo` fixtures of `crates/test-fixtures`.
 - Update `README.md` and `ARCHITECTURE.md` to match the code after this step. Write them in ASD-STE100 Simplified Technical English, the same as the current files.
 - At the end, tell the user what this step does and what the next work is.
 

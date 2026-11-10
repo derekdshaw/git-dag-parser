@@ -17,11 +17,12 @@ With paths, the tool can answer "which directory made the most tree versions". W
 
 ## Project and status before this step
 
-- Repository: this repository (Rust, binary and library crate).
+- Repository: this repository, a Cargo workspace (step 11). The binary crate `git-dag-parser` is at the root. The parser library `git-dag-parser-core` is in `crates/git-dag-parser-core`. The `Repo` test fixtures are in `crates/test-fixtures`.
+- The parser work of this step (reflogs and the index) goes in the library crate. The paths and the reachability go in the application crate. Their results stay in the application, next to `Attribution` (step 5). Do not add fields for them to the library types `Commit`, `Tree`, `Blob`, or `Tag`, or to the parse result struct.
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
-- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 5 (commit rank and owner).
+- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 5 (commit rank and owner), 10 (CI and releases), 11 (parser library crate).
 - Data that this step uses:
-  - `Tree.introduced_by` and `Blob.introduced_by` (step 5), and the commit `rank`.
+  - `Attribution` (step 5, `src/attribution/`): the owner commit of each tree and blob (`tree_introduced_by`, `blob_introduced_by`), and the commit `rank`.
   - `TreeEntries` (step 4.1) with `child`, `name` (`NameId`), and `mode`. `NameStore` (step 4.1) gives the name bytes.
   - Both are fields of the parse result struct (step 4.1, part 8), not of `ObjectContainer`.
   - `ObjectContainer.refs` with `target: Option<ObjectId>` (step 3). `Tag.target` (step 3).
@@ -42,7 +43,7 @@ With paths, the tool can answer "which directory made the most tree versions". W
 - A path is its parent path plus one name. The path table is a prefix tree on the `NameStore`: each path has a `parent`, a `name` (`NameId`), and a `depth`. Its id is its position in the table. `src/parser/main.rs` is the path with the name `main.rs` and the parent `src/parser`.
 - Do not keep the full path bytes in memory. Do not make a second `NameStore` for paths. Make the full bytes from the parent chain only when you need them: for the sort in item 4, and for the database write in step 7.
 - Give path ids in the sort order of the full path bytes. Then the ids do not change between runs.
-- `ObjectContainer` does not hold a `NameId`. The paths go in the parse result struct (step 4.1, part 8), next to `TreeEntries` and the `NameStore`. `Tree` and `Blob` keep only the path id.
+- `ObjectContainer` does not hold a `NameId`. The paths are a result of the application, not of the parse. Keep them in a struct of the application crate, for example `Paths { paths: Vec<Path>, tree_path: Vec<u32>, blob_path: Vec<u32> }`. For each tree and blob, keep only the path id.
 - An object gets its path from its introducing parent. If there are many introducing parents, use the lowest (tree index, entry index). Tree indices are in hash order, so the result does not change between runs.
 - A tree edge stores the entry name, not a path id. One tree can be at many paths, so a path is a fact about the object owner, not about the edge.
 - Reflogs are not an object type. Reflog entries are roots for reachability, the same as refs.
@@ -58,25 +59,25 @@ Let object `o` have owner `c`, and let `o` not be the root tree of `c`. Commit `
 
 ### Paths
 
-1. Add a `Path` model: `parent: Option<u32>`, `name: NameId`, `depth: u32`. The id of a path is its position in `paths`. Do not keep a `Vec<u8>` for each path. Add `paths: Vec<Path>` to the parse result struct (step 4.1, part 8), not to `ObjectContainer`.
+1. Add a `Path` type in the application crate: `parent: Option<u32>`, `name: NameId`, `depth: u32`. The id of a path is its position in `paths`. Do not keep a `Vec<u8>` for each path. Keep `paths: Vec<Path>` in the paths struct, not in the parse result struct or in `ObjectContainer`.
 2. Find the introducing parent of each tree and blob:
    1. Use `AtomicU64` for each object. Pack (tree index, entry index) into the value. Set each value to `u64::MAX`.
    2. In parallel, for each tree `T` and each entry: if `owner(T) == owner(child)`, do `fetch_min` with (T, entry index).
    3. If an object is the root tree of its owner commit, it has the empty path and no introducing parent.
 3. Calculate the path of each object from the path of its introducing parent plus the entry name. Process trees from the root down. Use the frontier order from step 5, or keep a cache.
 4. Make the path table. Sort the paths by their full path bytes. Make these bytes from the parent chain for the sort, then drop them. Give the ids in that order, and change each `parent` to the new id.
-5. Add `introduced_at_path: Option<u32>` to `Tree` and `Blob`.
+5. Keep the path id of each tree and blob (`introduced_at_path`) in two `u32` arrays of the paths struct. `u32::MAX` means no path. Add methods that return `Option<u32>`.
 
 ### Reflogs
 
-6. Make `src/parser/reflogs.rs`. Read `logs/HEAD` and all files under `logs/refs/`. Skip files that end in `.lock`.
-7. Add a `ReflogEntry` model: `ref_name`, `old_hash`, `new_hash`, `old_target`, `new_target` (`Option<ObjectId>`), `time`, `message` (bytes).
+6. Make `crates/git-dag-parser-core/src/parser/reflogs.rs`. Read `logs/HEAD` and all files under `logs/refs/`. Skip files that end in `.lock`.
+7. Add a `ReflogEntry` model in `crates/git-dag-parser-core/src/models/`: `ref_name`, `old_hash`, `new_hash`, `old_target`, `new_target` (`Option<ObjectId>`), `time`, `message` (bytes).
 8. An all-zero hash means "no object". Resolve it to `None`.
 9. Add `reflog_entries: Vec<ReflogEntry>` to `ObjectContainer`.
 
 ### Index
 
-10. Make `src/parser/index.rs`. Read `git_dir/index`. Support index versions 2, 3, and 4. Version 4 compresses the path of each entry against the previous entry.
+10. Make `crates/git-dag-parser-core/src/parser/index.rs`. Read `git_dir/index`. Support index versions 2, 3, and 4. Version 4 compresses the path of each entry against the previous entry.
 11. From each entry, get the blob hash (or the tree hash for a sparse directory entry, mode `040000`).
 12. Read the `TREE` extension. Get the hash of each valid cache-tree node.
 13. If the index has a `link` extension (split index), also read `git_dir/sharedindex.<hash>`.
@@ -84,7 +85,7 @@ Let object `o` have owner `c`, and let `o` not be the root tree of `c`. Commit `
 
 ### Reachability
 
-15. Add a `Liveness` enum with the order `Unreachable < ReflogOnly < IndexOnly < Ref`. Add `liveness` to `Commit`, `Tree`, `Blob`, and `Tag`.
+15. Add a `Liveness` enum in the application crate with the order `Unreachable < ReflogOnly < IndexOnly < Ref`. Keep the liveness of each commit, tree, blob, and tag in one array for each type (one byte for each object), in a struct of the application.
 16. Mark the roots:
     - Each ref target gets `Ref`.
     - Each index root gets `IndexOnly`.
@@ -107,7 +108,7 @@ Unit tests (in the source files):
 - Index: parse a small index of version 2 and of version 4, with a `TREE` extension. Get the correct blob and tree hashes.
 - Liveness: on a small hand-made graph, `Ref` is stronger than `IndexOnly`, `IndexOnly` is stronger than `ReflogOnly`, and an object with no root is `Unreachable`.
 
-Integration tests (in `tests/`, with `Repo` fixtures):
+Integration tests (with `Repo` fixtures from `crates/test-fixtures`; the paths and reachability tests in the root `tests/`, the index and reflog tests in `crates/git-dag-parser-core/tests/`):
 
 - Paths: for each commit `c` in rank order, run `git rev-list --objects c --not <commits with lower rank>`. This prints a path for each object. Compare it with `introduced_at_path`. Skip objects that are at two paths in one commit, because git can select a different path.
 - Reachability fixture:
@@ -140,7 +141,7 @@ Integration tests (in `tests/`, with `Repo` fixtures):
 - Do one step in one commit.
 - Show the diff to the user before the commit. Do not commit until the user approves.
 - Do not put a "Co-Authored-By" line or other tagline in the commit message.
-- Put unit tests in the source file. Put tests that use real git repositories in `tests/`.
+- Put unit tests in the source file. Put tests that use real git repositories in the `tests/` folder of the crate that has the code: `tests/` at the root for the application, `crates/git-dag-parser-core/tests/` for the parser. Both use the `Repo` fixtures of `crates/test-fixtures`.
 - Update `README.md` and `ARCHITECTURE.md` to match the code after this step. Write them in ASD-STE100 Simplified Technical English, the same as the current files.
 - At the end, tell the user what this step does and what the next step is.
 
