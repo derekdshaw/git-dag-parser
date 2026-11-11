@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use git_dag_parser_core::models::container::ObjectHash;
+use git_dag_parser_core::models::container::{ObjectHash, HEX_HASH_LEN};
 use git_dag_parser_core::models::ObjectContainer;
 use tempfile::TempDir;
 
@@ -41,6 +41,19 @@ impl Repo {
     // No `Default`: each call makes a new repository with git
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
+        Self::init(&[])
+    }
+
+    /// A repository that uses SHA-256 object hashes, with one commit
+    pub fn with_sha256() -> Self {
+        let repo = Self::init(&["--object-format=sha256"]);
+        repo.write("a.txt", "a\n");
+        repo.commit("first");
+        repo
+    }
+
+    /// `git init` with `extra` arguments in a new temporary directory
+    fn init(extra: &[&str]) -> Self {
         let tmp = TempDir::new().unwrap();
         let work = tmp.path().join("repo");
         fs::create_dir(&work).unwrap();
@@ -52,7 +65,9 @@ impl Repo {
             msg_file,
             clock: Cell::new(1_700_000_000),
         };
-        repo.git(&["init", "-q", "-b", "main"]);
+        let mut args = vec!["init", "-q", "-b", "main"];
+        args.extend_from_slice(extra);
+        repo.git(&args);
         repo
     }
 
@@ -347,7 +362,7 @@ impl Repo {
                     .lines()
                     .filter(|line| {
                         let f: Vec<&str> = line.split_whitespace().collect();
-                        f.len() == 7 && f[0].len() == 40
+                        f.len() == 7 && f[0].len() == HEX_HASH_LEN
                     })
                     .count()
             })
@@ -400,7 +415,7 @@ impl Repo {
             for line in String::from_utf8(out).unwrap().lines() {
                 // <hash> <type> <size> <size-in-pack> <offset> [<depth> <base>]
                 let f: Vec<&str> = line.split_whitespace().collect();
-                if f.len() >= 5 && f[0].len() == 40 {
+                if f.len() >= 5 && f[0].len() == HEX_HASH_LEN {
                     let key = (pack_name.clone(), f[4].parse().unwrap());
                     entries.insert(key, (f[0].to_string(), f[3].parse().unwrap()));
                 }

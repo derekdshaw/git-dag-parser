@@ -8,7 +8,7 @@ This plan has seven small fixes. Each fix is independent of the others. Each fix
 | ------------------------------ | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | A. Linked worktrees            | The tool finds no objects in a linked worktree.                                           | At any time.                                               |
 | B. Alternates                  | The tool does not read objects from other object stores. Edges to those objects are lost. | After step 4.                                              |
-| C. SHA-256 repositories        | The tool reads a SHA-256 repository as SHA-1. The result is wrong and has no error.       | At any time.                                               |
+| C. SHA-256 repositories        | Resolved. `parse_objects` stops with an error on a SHA-256 repository.                    | Done.                                                      |
 | D. Empty repository            | Resolved by step 4.1 part 2. An empty repository no longer causes a panic. No test checks it. | At any time: only add the tests. |
 | E. Documentation               | Mostly resolved. The `updated-docs` branch rewrites `ARCHITECTURE.md` and adds `README.md`. | After step 5: add "introduced by" and the rank.            |
 | F. Progress without a terminal | A long run shows no progress when the output is not a terminal.                           | At any time. After step 11, mostly a change to the binary. |
