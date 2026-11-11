@@ -11,22 +11,24 @@ This plan has seven small fixes. Each fix is independent of the others. Each fix
 | C. SHA-256 repositories        | The tool reads a SHA-256 repository as SHA-1. The result is wrong and has no error.       | At any time.                                               |
 | D. Empty repository            | Resolved by step 4.1 part 2. An empty repository no longer causes a panic. No test checks it. | At any time: only add the tests. |
 | E. Documentation               | Mostly resolved. The `updated-docs` branch rewrites `ARCHITECTURE.md` and adds `README.md`. | After step 5: add "introduced by" and the rank.            |
-| F. Progress without a terminal | A long run shows no progress when the output is not a terminal.                           | At any time. Easier after step 4.1.                        |
+| F. Progress without a terminal | A long run shows no progress when the output is not a terminal.                           | At any time. After step 11, mostly a change to the binary. |
 | G. `init --help` text          | Resolved. The JSON removal (PR #1) removed `--output`. Step 7 adds it again with a default. | Nothing to do.                                             |
 
 ## Project and status
 
-- Repository: this repository (Rust, binary and library crate).
+- Repository: this repository, a Cargo workspace (step 11). The binary crate `git-dag-parser` is at the root. The parser library `git-dag-parser-core` is in `crates/git-dag-parser-core`. The `Repo` test fixtures are in `crates/test-fixtures`.
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
 - Completed steps at the time of this plan: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs). Commit `8cdd22c`.
 - Completed steps now (2026-10-30): also 4 (two-pass read, hash-ordered indices, object copies) and 4.1 parts 1 and 2 (name store, flat tree entries, `build_relationships` removed). Commit `eacf1b0` on main.
+- Completed steps on 2026-11-09: also all of 4.1, 10 (CI and releases), and 11 (parser library crate).
 - Other plans in this folder: steps 4.1 and 5 to 8. Some fixes here depend on them. See the table above.
 - Important files:
-  - `src/commands/init.rs`: `find_git_dir` finds the git directory. It is not in the library, so tests cannot use it.
-  - `src/parser/mod.rs`: `parse_objects(git_dir)` reads `objects/pack`, loose objects, and refs.
-  - `src/parser/scan.rs`: `list_loose_objects` reads only `objects/xx/` directories with two hex digits, so it skips `objects/info` and `objects/pack`. `discover_packs` reads `objects/pack/`.
-  - `src/parser/refs.rs`: `read_refs(git_dir)` reads `packed-refs`, `refs/`, and `HEAD`.
-  - `tests/common/mod.rs`: the `Repo` fixture builder and git oracles.
+  - `crates/git-dag-parser-core/src/repo.rs`: `find_git_dir` finds the git directory. Step 11 moved it to the library.
+  - `crates/git-dag-parser-core/src/parser/mod.rs`: `parse_objects(git_dir)` reads `objects/pack`, loose objects, and refs.
+  - `crates/git-dag-parser-core/src/parser/scan.rs`: `list_loose_objects` reads only `objects/xx/` directories with two hex digits, so it skips `objects/info` and `objects/pack`. `discover_packs` reads `objects/pack/`.
+  - `crates/git-dag-parser-core/src/parser/refs.rs`: `read_refs(git_dir)` reads `packed-refs`, `refs/`, and `HEAD`.
+  - `crates/test-fixtures/src/lib.rs`: the `Repo` fixture builder and git oracles.
+  - `src/progress.rs` (binary): `ProgressLayer` draws the progress bar from the parser's `tracing` events.
 
 ## Rules for this work
 
@@ -34,7 +36,7 @@ This plan has seven small fixes. Each fix is independent of the others. Each fix
 - Write the test first. Make sure that it fails before you repair the code.
 - Show the diff to the user before the commit. Do not commit until the user approves.
 - Do not put a "Co-Authored-By" line or other tagline in the commit message.
-- Put unit tests in the source file. Put tests that use real git repositories in `tests/`.
+- Put unit tests in the source file. Put tests that use real git repositories in the `tests/` folder of the crate that has the code: `tests/` at the root for the application, `crates/git-dag-parser-core/tests/` for the parser. Both use the `Repo` fixtures of `crates/test-fixtures`.
 - At the end, tell the user what the fix does and which fixes remain.
 
 ---
@@ -53,7 +55,7 @@ Also, the `HEAD` of each linked worktree can keep commits alive. `git gc` uses t
 
 ### Work to do
 
-1. Move `find_git_dir` from `src/commands/init.rs` to a new library module `src/repo.rs`. Tests can then use it.
+1. (Done in step 11: `find_git_dir` is in `crates/git-dag-parser-core/src/repo.rs`.)
 2. Return two paths:
    - `git_dir`: the directory for this worktree. `HEAD` is here.
    - `common_dir`: the directory that has `objects/`, `refs/`, and `packed-refs`. Read `git_dir/commondir` if it exists. The path in that file is relative to `git_dir`. If the file does not exist, `common_dir` is `git_dir`.
@@ -63,7 +65,7 @@ Also, the `HEAD` of each linked worktree can keep commits alive. `git gc` uses t
 
 ### Tests
 
-- Unit test in `src/repo.rs`: a temporary directory with a `.git` file and a `commondir` file gives the correct `git_dir` and `common_dir`.
+- Unit test in `crates/git-dag-parser-core/src/repo.rs`: a temporary directory with a `.git` file and a `commondir` file gives the correct `git_dir` and `common_dir`.
 - Integration test: make a fixture, then run `git worktree add ../wt`. Run the parser on the `wt` directory. The object set equals `git cat-file --batch-all-objects` in the main repository.
 - Integration test: in the worktree, run `git checkout --detach HEAD~1`. The refs include `worktrees/wt/HEAD` with the correct target.
 
@@ -115,7 +117,7 @@ This fix adds an `external` flag to the `Pack` and `ObjectCopy` records.
 
 ### Problem
 
-Git can make repositories that use SHA-256 hashes (`git init --object-format=sha256`). The hashes are 32 bytes. The tool uses 20-byte hashes everywhere (`pub type ObjectHash = [u8; 20]` in `src/models/container.rs`).
+Git can make repositories that use SHA-256 hashes (`git init --object-format=sha256`). The hashes are 32 bytes. The tool uses 20-byte hashes everywhere (`pub type ObjectHash = [u8; 20]` in `crates/git-dag-parser-core/src/models/container.rs`).
 
 At this time, the tool reads a SHA-256 repository with the wrong hash length. The result is wrong, and the tool does not show an error.
 
@@ -204,11 +206,12 @@ What remains: after step 5, describe "introduced by" and the commit rank (correc
 
 ### Problem
 
-The parser uses `indicatif` progress bars. `indicatif` hides a progress bar when the output is not a terminal. In a run on a large repository with the output sent to a file, the last line was `Pack header: version 2, <count> objects declared`. For the next 15 minutes there was no output. The user cannot see if the run makes progress or has stopped.
+Before step 11, the parser drew `indicatif` progress bars. Now the parser sends the progress of pass 2 as `tracing` events (target `PROGRESS_TARGET`), and the binary draws the bar in `ProgressLayer` (`src/progress.rs`). Pass 1 sends no progress events. `indicatif` hides a progress bar when the output is not a terminal. In a run on a large repository with the output sent to a file, the last line was `Pack header: version 2, <count> objects declared`. For the next 15 minutes there was no output. The user cannot see if the run makes progress or has stopped.
 
 ### Work to do
 
-1. When the output is not a terminal, write one progress line at a fixed interval (for example each 10 seconds). Use `tracing` at `info` level.
+1. In `ProgressLayer`, when the output is not a terminal, write one progress line at a fixed interval (for example each 10 seconds). Use `tracing` at `info` level.
+   - If pass 1 also needs progress, send events from pass 1 in the library, the same as pass 2 does.
 2. Each line shows the phase, the objects done, the total, the rate, and the `RssAnon` value.
 3. When the output is a terminal, keep the progress bars.
 4. Write the bars and the lines to stderr. Keep stdout for results.
@@ -217,7 +220,7 @@ The parser uses `indicatif` progress bars. `indicatif` hides a progress bar when
 ### Tests
 
 - Unit test: the function that makes the progress line gives the expected text for known values.
-- Integration test: run the binary on a fixture with stdout and stderr sent to pipes. Use a short interval. Make sure that stderr has at least one progress line.
+- Integration test (in the root `tests/`): run the binary on a fixture with stdout and stderr sent to pipes. Use a short interval. Make sure that stderr has at least one progress line.
 
 ### Prompt to start this fix
 

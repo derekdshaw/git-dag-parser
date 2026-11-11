@@ -14,11 +14,11 @@ This step finds the commit that added each tree and each blob. This commit is th
 
 ## Project and status before this step
 
-- Repository: this repository (Rust, binary and library crate).
+- Repository: this repository, a Cargo workspace (step 11). The binary crate `git-dag-parser` is at the root. The parser library `git-dag-parser-core` is in `crates/git-dag-parser-core`. The `Repo` test fixtures are in `crates/test-fixtures`.
 - Purpose of the tool: find the cause of repository bloat. Trace large objects back to the commits and paths that added them.
-- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 10 (CI and releases).
-- Do step 11 (`docs/plans/11-move-dag-parsing-to-lib-plan.md`) before this step. After step 11, the parser is a library crate, and `src/attribution/` goes in the application crate. Step 11 updates the paths in this plan.
-  - Step 11 moves the `Repo` fixtures (`tests/common/`) to the crate `crates/test-fixtures`. The integration tests of this step are in the application crate and use this crate as a dev-dependency.
+- Completed steps: 1 (tests), 2 (sizes and names), 3 (hashes, parents, tags, refs), 4 (two-pass read, hash-ordered indices, object copies), 4.1 (compact tree entries, name store, bounded delta cache, parallel parse), 10 (CI and releases), 11 (parser library crate).
+- Step 11 is done. The parser is the library crate `git-dag-parser-core`, and `src/attribution/` goes in the application crate at the root. The integration tests of this step are in the root `tests/`. They use the `Repo` fixtures of `crates/test-fixtures`, a dev-dependency of the application crate.
+- The results of this step stay in the application crate. Do not add fields to `Commit`, `Tree`, or `Blob`: these types are in the library and hold only the parse output. `src/attribution/` returns a struct `Attribution` with arrays in container order (index `i` is commit, tree, or blob `i`).
 - Data that this step uses, from `ParseResult` (`container` and `tree_entries`):
   - `Commit.tree` (`Option<usize>`, index of the root tree, `None` if the tree is not in the store), `Commit.parents` (`Vec<usize>`, only parents in the store), `Commit.boundary`, `Commit.commit_time` (`i64`), `Commit.hash`.
   - `TreeEntries` (step 4.1): private flat arrays `start` (`u64`), `child` (`u32`), `name` (`NameId`), and `mode` (`FileKind` as one byte). `entries(tree)` gives `(Option<usize>, NameId, FileKind)` for each entry of one tree. The `FileKind` tells if the child is a tree or a blob. The child is `None` (`TreeEntries::NO_CHILD`) for a submodule and for a child that is not in the store.
@@ -58,31 +58,33 @@ A commit can reach `o` only if `o` is its root tree, or if the commit can reach 
 
 ## Work to do
 
-1. Make a new module `src/attribution/`. Add `mod.rs`, `rank.rs`, and `owner.rs`. Export it from `src/lib.rs`.
+1. Make a new module `src/attribution/` in the application crate. Add `mod.rs`, `rank.rs`, and `owner.rs`. Export it from the root `src/lib.rs`. `mod.rs` has the struct `Attribution` and the function that calculates it from `&ParseResult`.
 2. In `rank.rs`, calculate the corrected date:
    1. Count the children of each commit.
    2. Start with the commits that have no parents in the store.
    3. Use a queue (Kahn's algorithm). Do not use recursion. Large histories have millions of commits.
    4. Ignore parents that are not in the store. `Commit.boundary` already marks these commits.
 3. Sort the commits by (corrected date, hash). Give each commit its rank.
-4. Add `corrected_date: i64` and `rank: u32` to `Commit`.
+4. Add `corrected_date: Vec<i64>` and `rank: Vec<u32>` (one value for each commit) to `Attribution`.
 5. Count the commits where the corrected date is not equal to the committer time. Show this number in the output. It shows how much clock errors affect the result.
 6. In `owner.rs`, calculate the owner of each tree and blob. Use `rayon` parallel iterators on borrowed data:
    - The workers borrow `&TreeEntries`, the commit ranks, and the `AtomicU32` arrays for owner and in-degree. `rayon` returns only after all workers are done, so the data does not have to be `'static`.
    - Do not use `Arc`, `thread::spawn`, or a channel. The workers write their results with atomic operations. Nothing is sent back, and nothing is merged.
+   - The values must be atomic because many trees contain the same child, and different workers process these trees at the same time. Also, exactly one worker must see the in-degree of a child become 0, so that the child goes into the next frontier one time. Do not give each worker its own arrays and merge them after each round: on 1JS, full arrays are approximately 50 MB for each thread, and they must be merged after each round. Also, a list of `(child, owner)` pairs is approximately 5 GB.
+   - Use `Ordering::Relaxed` for all atomic operations. The `rayon` call of each round returns only after all its workers are done, so all writes of a round are visible to the next round.
    - This calculation does not use the `NameStore`. Do not remove it: step 6 uses it for paths, and step 7 writes the names.
    1. Make `owner: Vec<AtomicU32>` for trees and for blobs. Set each value to `u32::MAX`.
    2. For each commit with a root tree, set `owner[root]` to the minimum of its value and the commit rank (`fetch_min`).
    3. Calculate the in-degree of each tree from `TreeEntries`. Count each entry, also duplicates. Use `Vec<AtomicU32>` and a parallel loop over the trees.
    4. Put all trees with in-degree 0 into the first frontier. This includes trees that no commit reaches.
    5. For each round, process the frontier trees in parallel (`rayon`). For each entry of tree `T`:
-      - Do `owner[child].fetch_min(owner[T])`.
-      - A tree with many entries (a large monorepo can have one with approximately 84,000) is a large unit of work. Process its entries in parallel chunks. `entries(tree)` is an iterator, so add a method to `TreeEntries` that gives the `child` and `mode` slices of one tree.
-      - Tests must use a small chunk size, so that a small tree is cut into chunks. Use two module-level constants side by side, `#[cfg(not(test))]` and `#[cfg(test)]`, as `GATHER_CHUNK` does (`src/models/container.rs`). A constant inside `mod tests` is not visible to the parent module.
+      - Do `owner[child].fetch_min(owner[T])`. First read `owner[child]` with `load`, and do `fetch_min` only if `owner[T]` is smaller. On x86, `fetch_min` is a `cmpxchg` loop, and it takes the cache line from the other cores. A child that many trees contain usually gets its minimum from the first tree, so most entries then do only a read.
+      - A tree with many entries (a large monorepo can have one with approximately 84,000) is a large unit of work. Process its entries in parallel chunks. `entries(tree)` is an iterator, so add a method to `TreeEntries` that gives the `child` and `mode` slices of one tree. `TreeEntries` is in the library (`crates/git-dag-parser-core/src/models/container.rs`), so this method is a change to the library.
+      - Tests must use a small chunk size, so that a small tree is cut into chunks. Use two module-level constants side by side, `#[cfg(not(test))]` and `#[cfg(test)]`, as `GATHER_CHUNK` does (`crates/git-dag-parser-core/src/models/container.rs`). A constant inside `mod tests` is not visible to the parent module.
       - If the child is a tree, decrease its in-degree by 1. If the in-degree becomes 0, put the child in the next frontier.
    6. Stop when the frontier is empty.
    7. Ignore entries with no child (`None` from `entries`, `NO_CHILD` in the slice). This includes all submodule entries.
-7. Add `introduced_by: Option<u32>` (commit index) to `Tree` and `Blob`. Convert the rank to the commit index. `u32::MAX` gives `None`.
+7. Add `tree_introduced_by: Vec<u32>` and `blob_introduced_by: Vec<u32>` (commit index) to `Attribution`. Convert the rank to the commit index. `u32::MAX` means that the object has no owner. Add methods `tree_introduced_by(i)` and `blob_introduced_by(i)` that return `Option<u32>`, with `None` for `u32::MAX`.
 8. There is no old walk to remove. Step 4.1 removed it. Step 6 adds paths again in a new form.
 9. Update `src/commands/init.rs` to call the rank and owner calculation after the parse.
    - Show the number of commits from item 5 in the `=== DAG Summary ===` section.
@@ -99,13 +101,13 @@ Unit tests (in `rank.rs` and `owner.rs`):
 - Corrected date with a clock error: P has time 1000. Its child C has time 900. C gets 1001. The child G of C has time 950. G gets 1002.
 - Rank tie-break: two commits with the same corrected date sort by hash.
 - A commit with a missing parent uses its own time.
-- Owner on a small hand-made graph. Make the `TreeEntries` with `TreeEntriesBuilder` and `TreeEntries::merge`, as `merge_one` does in the tests of `src/models/container.rs`.
+- Owner on a small hand-made graph. Make the `TreeEntries` with `TreeEntriesBuilder` and `TreeEntries::merge`, as `merge_one` does in the tests of `crates/git-dag-parser-core/src/models/container.rs`. Both are public.
   - Two commits share a subtree. The lower rank owns it.
   - One blob is at two paths in one tree. It has one owner.
   - A tree that no commit reaches has no owner.
 - The same graph gives the same result with 1, 2, and 8 threads. Use `rayon::ThreadPoolBuilder`.
 
-Integration tests (in `tests/`, with new `Repo` fixtures):
+Integration tests (in the root `tests/`, with new `Repo` fixtures in `crates/test-fixtures`):
 
 - Make a fixture with these events:
   - a rename of a file,
@@ -123,7 +125,7 @@ Integration tests (in `tests/`, with new `Repo` fixtures):
 
 - Use a small program in the session scratchpad. Run oracle 2 on this repository and on the repositories in `docs/benchmarks/README.md`.
 - Run the harness on vscode and git-ms. Compare the time of the rank and owner calculation with the old `build_relationships` (harness, commit `b50d421`): vscode 8.0 s, git-ms 10.3 s. For scale, the parse after step 4.1 is 1.3–1.5 s on vscode and 2.8–2.9 s on git-ms (32 threads).
-- Run the harness on linux (see `docs/benchmarks/README.md`) with `--limit-gb 48`. Do not write to that repository. Record the number of frontier rounds, the time, the peak `RssAnon` of the `attribution` window, and the number of commits where the corrected date is not equal to the committer time. After step 4.1 the peak of the linux parse is 8.94–9.10 GB on 32 threads; each array of this step has 4 bytes for each tree, blob, or commit (10.5 million objects on linux in all).
+- Run the harness on linux (see `docs/benchmarks/README.md`) with `--limit-gb 48`. Do not write to that repository. Record the number of frontier rounds, the time, the peak `RssAnon` of the `attribution` window, and the number of commits where the corrected date is not equal to the committer time. After step 4.1 the peak of the linux parse is 8.94–9.10 GB on 32 threads; each array of this step has 4 bytes for each tree, blob, or commit (8 bytes for the corrected date) (10.5 million objects on linux in all).
 - `harness.py` gives `init` only `RUST_LOG` and `PATH`, so `RAYON_NUM_THREADS` does not change the thread count of its runs. It samples `RssAnon` every 0.2 s, which is too slow for a run of less than about 1 s, such as zed.
 
 ## Out of scope
@@ -137,7 +139,7 @@ Integration tests (in `tests/`, with new `Repo` fixtures):
 - Do one step in one commit.
 - Show the diff to the user before the commit. Do not commit until the user approves.
 - Do not put a "Co-Authored-By" line or other tagline in the commit message.
-- Put unit tests in the source file. Put tests that use real git repositories in `tests/`.
+- Put unit tests in the source file. Put tests that use real git repositories in the `tests/` folder of the crate that has the code: `tests/` at the root for the application, `crates/git-dag-parser-core/tests/` for the parser. Both use the `Repo` fixtures of `crates/test-fixtures`.
 - Update `README.md` and `ARCHITECTURE.md` to match the code after this step. Write them in ASD-STE100 Simplified Technical English, the same as the current files.
 - At the end, tell the user what this step does and what the next step is.
 

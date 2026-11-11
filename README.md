@@ -113,21 +113,27 @@ After the program parses the repository, it shows a summary. This is an example 
 
 ```
 === DAG Summary ===
-Commits: 27
-Trees:   92
-Blobs:   193
+Commits: 97
+Trees:   306
+Blobs:   453
 Tags:    0
-Total:   312
-Names:   49 distinct, 0.7 KB
+Total:   856
+Names:   94 distinct, 2.0 KB
+Tree entries: 2075
+Delta cache: 0 hits, 0 misses, 0 evictions in 0 packs
 
 === Timing ===
-Parse:  135.732657ms
-Total:  135.737749ms
+Pass 1: 205.098386ms
+Pass 2: 18.853383ms
+Parse:  224.750948ms
+Total:  224.763221ms
 ```
 
 - `Commits`, `Trees`, `Blobs`, and `Tags` show the number of different objects of each type. The program counts each object one time, also when more than one pack file contains it.
 - `Names` shows the number of different file names and directory names in all trees. It also shows the total length of these names in kilobytes.
-- `Parse` shows the time that the program uses to parse the objects. `Total` shows the time for the full command.
+- `Tree entries` shows the number of entries in all trees.
+- `Delta cache` shows the delta cache hits, misses, and evictions of pass 2, for all packs together. In this example, the repository has only loose objects, thus there are no packs.
+- `Pass 1` and `Pass 2` show the time of each pass. `Parse` shows the time that the program uses to parse the objects. `Total` shows the time for the full command.
 
 ### Threads and memory
 
@@ -156,18 +162,20 @@ At the `warn` level, the program does not show progress bars.
 To run the tests, use this command:
 
 ```
-cargo test
+cargo test --workspace
 ```
 
-- The unit tests are in the source files, in `#[cfg(test)]` modules.
-- The integration tests are in `tests/`. Each test makes a small repository with `git`. Then it compares the parser output with the output of `git`.
+The repository is a Cargo workspace. Without `--workspace`, `cargo test` tests only the program, and not the parser library in `crates/git-dag-parser-core`.
 
-For each pull request and each push to `main`, the CI workflow (`.github/workflows/ci.yml`) runs the tests, `cargo clippy`, and `cargo fmt --check` on Linux, macOS, and Windows.
+- The unit tests are in the source files, in `#[cfg(test)]` modules.
+- The integration tests of the parser are in `crates/git-dag-parser-core/tests/`. Each test makes a small repository with `git`. Then it compares the parser output with the output of `git`. The tests make the repositories with the `Repo` fixtures of `crates/test-fixtures`.
+
+For each pull request and each push to `main`, the CI workflow (`.github/workflows/ci.yml`) runs the tests, `cargo clippy`, and `cargo fmt --check` for all crates on Linux, macOS, and Windows.
 
 The `git_oracle` test parses large repositories and compares the result with `git`. Cargo does not run this test unless you tell it to, because the test uses repositories that are not in the project. To run it, use this command:
 
 ```
-GDP_ORACLE_REPOS=/path/to/repo1:/path/to/repo2 cargo test --release --test git_oracle -- --ignored --nocapture
+GDP_ORACLE_REPOS=/path/to/repo1:/path/to/repo2 cargo test --release -p git-dag-parser-core --test git_oracle -- --ignored --nocapture
 ```
 
 ## Benchmarks
