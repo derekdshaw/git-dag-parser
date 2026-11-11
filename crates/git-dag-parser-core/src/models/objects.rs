@@ -1,4 +1,4 @@
-use super::container::ObjectHash;
+use super::container::{ObjectHash, HASH_LEN};
 
 /// A typed reference to an object: the variant names the container array,
 /// the value is the index into it
@@ -196,7 +196,7 @@ impl Tag {
             size,
             size_disk,
             name: Vec::new(),
-            target_hash: [0; 20],
+            target_hash: [0; HASH_LEN],
             target: None,
         }
     }
@@ -411,9 +411,9 @@ mod tests {
 
     #[test]
     fn ref_new_sets_kind_and_leaves_target_unresolved() {
-        let r = Ref::new(b"refs/tags/v1".to_vec(), [7; 20]);
+        let r = Ref::new(b"refs/tags/v1".to_vec(), [7; HASH_LEN]);
         assert_eq!(r.kind, RefKind::Tag);
-        assert_eq!(r.target_hash, [7; 20]);
+        assert_eq!(r.target_hash, [7; HASH_LEN]);
         assert_eq!(r.target, None);
     }
 
@@ -460,13 +460,13 @@ mod tests {
 
     #[test]
     fn tag_new_leaves_body_fields_unread() {
-        let t = Tag::new(2, [9; 20], 150, 120);
+        let t = Tag::new(2, [9; HASH_LEN], 150, 120);
 
         assert_eq!(t.index, 2);
-        assert_eq!(t.hash, [9; 20]);
+        assert_eq!(t.hash, [9; HASH_LEN]);
         assert_eq!((t.size, t.size_disk), (150, 120));
         assert!(t.name.is_empty());
-        assert_eq!(t.target_hash, [0; 20]);
+        assert_eq!(t.target_hash, [0; HASH_LEN]);
         assert_eq!(t.target, None);
     }
 

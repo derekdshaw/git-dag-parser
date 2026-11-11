@@ -21,6 +21,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use git_dag_parser_core::models::container::HEX_HASH_LEN;
 use git_dag_parser_core::models::{ObjectContainer, RefKind};
 use git_dag_parser_core::parser::{parse_objects, parse_objects_with, ParseOptions};
 use git_dag_parser_core::size::{format_size, parse_size};
@@ -165,7 +166,7 @@ fn check_commits(git_dir: &Path, c: &ObjectContainer, out: &mut Vec<String>) {
     let expected: HashMap<&str, &str> = std::str::from_utf8(&log)
         .unwrap()
         .lines()
-        .map(|l| (&l[..40], l[41..].trim_end()))
+        .map(|l| (&l[..HEX_HASH_LEN], l[HEX_HASH_LEN + 1..].trim_end()))
         .collect();
 
     let mut check = Check::default();

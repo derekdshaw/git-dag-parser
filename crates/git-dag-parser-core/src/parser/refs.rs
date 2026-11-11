@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::content::hex_to_hash;
-use crate::models::container::ObjectHash;
+use crate::models::container::{ObjectHash, HEX_HASH_LEN};
 
 /// Every direct ref as (name, target hash), sorted by name
 pub fn read_refs(git_dir: &Path) -> Result<Vec<(Vec<u8>, ObjectHash)>> {
@@ -39,7 +39,7 @@ fn parse_packed_refs(data: &[u8]) -> Result<Vec<(Vec<u8>, ObjectHash)>> {
     data.split(|&b| b == b'\n')
         .filter(|line| !line.is_empty() && line[0] != b'#' && line[0] != b'^')
         .map(|line| {
-            let (hex, name) = line.split_at(line.len().min(40));
+            let (hex, name) = line.split_at(line.len().min(HEX_HASH_LEN));
             Ok((name.trim_ascii().to_vec(), hex_to_hash(hex)?))
         })
         .collect()

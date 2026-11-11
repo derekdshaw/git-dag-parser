@@ -77,6 +77,7 @@ pub fn parse_objects(git_dir: &Path) -> Result<ParseResult> {
 ///    entry children are resolved to indices as the bodies are read, since
 ///    pass 1 indexed every object.
 pub fn parse_objects_with(git_dir: &Path, options: &ParseOptions) -> Result<ParseResult> {
+    crate::repo::check_object_format(git_dir)?;
     let mut scanned = scan::scan_repository(git_dir)?;
     let pass1 = scanned.elapsed;
     let bodies::Bodies {

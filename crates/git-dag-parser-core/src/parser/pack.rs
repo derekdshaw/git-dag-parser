@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use super::delta_cache::{request_times, DeltaCache, DeltaCacheStats, RequestTimes};
 use crate::error::ParseError;
-use crate::models::container::ObjectHash;
+use crate::models::container::{ObjectHash, HASH_LEN};
 use crate::models::{ObjectCopy, ObjectKind};
 
 /// Object type constants from Git pack format. The four whole-object codes
@@ -344,10 +344,11 @@ struct Head {
 /// OFS delta's base is at a lower offset, so its kind is already known.
 /// The returned graph gives the position of each delta's base.
 pub fn scan_pack(pack_data: &[u8], index: &PackIndex) -> Result<(Vec<ScannedEntry>, DeltaGraph)> {
-    if pack_data.len() < 12 + 20 {
+    // A 12-byte header, and a trailer with the checksum of the pack
+    if pack_data.len() < 12 + HASH_LEN {
         return Err(anyhow!("Pack file too small"));
     }
-    let pack_end = (pack_data.len() - 20) as u64;
+    let pack_end = (pack_data.len() - HASH_LEN) as u64;
 
     let mut order: Vec<usize> = (0..index.entries.len()).collect();
     order.par_sort_unstable_by_key(|&i| index.entries[i].offset);
@@ -456,11 +457,11 @@ fn delta_base(
         let (relative, header_len) = parse_ofs_delta_header(&pack_data[data_start..])?;
         Ok((offset - relative, data_start + header_len))
     } else {
-        let base_hash: ObjectHash = pack_data[data_start..data_start + 20].try_into()?;
+        let base_hash: ObjectHash = pack_data[data_start..data_start + HASH_LEN].try_into()?;
         let base_offset = index
             .offset_of(&base_hash)
             .ok_or_else(|| ParseError::ObjectNotFound(hex::encode(base_hash)))?;
-        Ok((base_offset as usize, data_start + 20))
+        Ok((base_offset as usize, data_start + HASH_LEN))
     }
 }
 
@@ -486,7 +487,7 @@ fn resolved_type(pack_data: &[u8], index: &PackIndex, mut offset: usize) -> Resu
 /// decoder that is reset and reused for every delta.
 fn delta_result_size(inflater: &mut Decompress, compressed: &[u8]) -> Result<u64> {
     // Two varints of at most 10 bytes each
-    let mut prefix = [0u8; 20];
+    let mut prefix = [0u8; HASH_LEN];
     inflater.reset(true);
     inflater
         .decompress(compressed, &mut prefix, FlushDecompress::None)
@@ -726,7 +727,7 @@ impl PackIndex {
 
         // Parse SHA-1 table
         let sha_start = fanout_end;
-        let sha_end = sha_start + total_objects * 20;
+        let sha_end = sha_start + total_objects * HASH_LEN;
 
         // Parse CRC32 table
         let crc_start = sha_end;
@@ -742,7 +743,8 @@ impl PackIndex {
         let mut entries = Vec::with_capacity(total_objects);
 
         for i in 0..total_objects {
-            let hash: ObjectHash = data[sha_start + i * 20..sha_start + (i + 1) * 20].try_into()?;
+            let hash: ObjectHash =
+                data[sha_start + i * HASH_LEN..sha_start + (i + 1) * HASH_LEN].try_into()?;
 
             let crc32 =
                 u32::from_be_bytes(data[crc_start + i * 4..crc_start + (i + 1) * 4].try_into()?);
@@ -789,11 +791,12 @@ mod benches {
     use flate2::write::ZlibEncoder;
     use flate2::{Compression, Decompress};
 
+    use crate::models::container::HASH_LEN;
     use crate::parser::content::benches::synthetic_tree;
     use crate::parser::delta_cache::DeltaCache;
 
     /// Bytes of one entry in `synthetic_tree`
-    const ENTRY_BYTES: usize = 42;
+    const ENTRY_BYTES: usize = 22 + HASH_LEN;
     /// Entry inserted by `edit_delta`
     const NEW_ENTRY: &[u8] = b"100644 new_file.rs\0";
 
@@ -1116,11 +1119,12 @@ mod tests {
             self.push(hash, &bytes)
         }
 
-        /// Pack bytes (with a dummy 20-byte trailer) and a hash-sorted index
+        /// Pack bytes (with a dummy trailer of `HASH_LEN` bytes) and a hash-sorted
+        /// index
         fn finish(mut self) -> (Vec<u8>, PackIndex) {
             let count = self.entries.len() as u32;
             self.data[8..12].copy_from_slice(&count.to_be_bytes());
-            self.data.extend_from_slice(&[0u8; 20]);
+            self.data.extend_from_slice(&[0u8; HASH_LEN]);
             self.entries.sort_by_key(|e| e.hash);
             (
                 self.data,
@@ -1158,18 +1162,18 @@ mod tests {
     fn scan_pack_returns_entries_in_offset_order_with_disk_sizes() {
         let mut pack = PackBuilder::new();
         // Hash order (1, 5, 9) deliberately differs from offset order (9, 1, 5)
-        let o_blob = pack.add([9; 20], OBJ_BLOB, b"hello");
-        let o_tree = pack.add([1; 20], OBJ_TREE, b"100644 f\0aaaaaaaaaaaaaaaaaaaa");
-        let o_commit = pack.add([5; 20], OBJ_COMMIT, b"tree x\n");
+        let o_blob = pack.add([9; HASH_LEN], OBJ_BLOB, b"hello");
+        let o_tree = pack.add([1; HASH_LEN], OBJ_TREE, b"100644 f\0aaaaaaaaaaaaaaaaaaaa");
+        let o_commit = pack.add([5; HASH_LEN], OBJ_COMMIT, b"tree x\n");
         let (data, index) = pack.finish();
-        let pack_end = (data.len() - 20) as u64;
+        let pack_end = (data.len() - HASH_LEN) as u64;
 
         let (entries, _) = scan_pack(&data, &index).unwrap();
 
         let offsets: Vec<u64> = entries.iter().map(|e| e.offset).collect();
         assert_eq!(offsets, vec![o_blob, o_tree, o_commit]);
         let hashes: Vec<ObjectHash> = entries.iter().map(|e| e.hash).collect();
-        assert_eq!(hashes, vec![[9; 20], [1; 20], [5; 20]]);
+        assert_eq!(hashes, vec![[9; HASH_LEN], [1; HASH_LEN], [5; HASH_LEN]]);
 
         let kinds: Vec<ObjectKind> = entries.iter().map(|e| e.kind).collect();
         assert_eq!(
@@ -1190,13 +1194,13 @@ mod tests {
     #[test]
     fn scan_pack_resolves_delta_kinds_and_sizes_through_chains() {
         let mut pack = PackBuilder::new();
-        let o_base = pack.add([1; 20], OBJ_BLOB, b"base blob");
+        let o_base = pack.add([1; HASH_LEN], OBJ_BLOB, b"base blob");
         // OFS delta on the blob, and an OFS delta on that delta (depth 2)
-        let o_d1 = pack.add_ofs_delta([2; 20], o_base, &[b'x'; 300]);
-        let o_d2 = pack.add_ofs_delta([3; 20], o_d1, &[b'y'; 40]);
+        let o_d1 = pack.add_ofs_delta([2; HASH_LEN], o_base, &[b'x'; 300]);
+        let o_d2 = pack.add_ofs_delta([3; HASH_LEN], o_d1, &[b'y'; 40]);
         // REF delta whose base comes later in the pack (forward reference)
-        let o_ref = pack.add_ref_delta([4; 20], [6; 20], b"tree later\n");
-        let o_commit = pack.add([6; 20], OBJ_COMMIT, b"tree ...\n");
+        let o_ref = pack.add_ref_delta([4; HASH_LEN], [6; HASH_LEN], b"tree later\n");
+        let o_commit = pack.add([6; HASH_LEN], OBJ_COMMIT, b"tree ...\n");
         let (data, index) = pack.finish();
 
         let (entries, _) = scan_pack(&data, &index).unwrap();
@@ -1228,19 +1232,19 @@ mod tests {
         let mut pack = PackBuilder::new();
         // Hashes are out of offset order. With chunks of 2 positions, the
         // bases below are in the same chunk, an earlier one, or a later one.
-        let o0 = pack.add([40; 20], OBJ_BLOB, b"base blob");
-        let o1 = pack.add_ofs_delta([30; 20], o0, b"on the blob");
+        let o0 = pack.add([40; HASH_LEN], OBJ_BLOB, b"base blob");
+        let o1 = pack.add_ofs_delta([30; HASH_LEN], o0, b"on the blob");
         // Base in the earlier chunk
-        pack.add_ofs_delta([90; 20], o1, b"depth 2");
+        pack.add_ofs_delta([90; HASH_LEN], o1, b"depth 2");
         // Base in a later chunk, and that base is itself a delta
-        pack.add_ref_delta([10; 20], [60; 20], b"forward ref");
-        let o4 = pack.add([80; 20], OBJ_COMMIT, b"tree x\n");
-        pack.add_ofs_delta([20; 20], o4, b"on the commit");
-        pack.add_ofs_delta([60; 20], o4, b"the base of the forward ref");
+        pack.add_ref_delta([10; HASH_LEN], [60; HASH_LEN], b"forward ref");
+        let o4 = pack.add([80; HASH_LEN], OBJ_COMMIT, b"tree x\n");
+        pack.add_ofs_delta([20; HASH_LEN], o4, b"on the commit");
+        pack.add_ofs_delta([60; HASH_LEN], o4, b"the base of the forward ref");
         // Base two chunks back
-        pack.add_ref_delta([70; 20], [40; 20], b"backward ref");
-        let o8 = pack.add([50; 20], OBJ_TREE, b"100644 f\0aaaaaaaaaaaaaaaaaaaa");
-        pack.add_ofs_delta([100; 20], o8, b"on the tree");
+        pack.add_ref_delta([70; HASH_LEN], [40; HASH_LEN], b"backward ref");
+        let o8 = pack.add([50; HASH_LEN], OBJ_TREE, b"100644 f\0aaaaaaaaaaaaaaaaaaaa");
+        pack.add_ofs_delta([100; HASH_LEN], o8, b"on the tree");
         let (data, index) = pack.finish();
 
         let scan_on = |threads| {
@@ -1286,10 +1290,10 @@ mod tests {
     #[test]
     fn pack_reader_inflates_whole_objects_and_resolves_delta_chains() {
         let mut pack = PackBuilder::new();
-        let o_base = pack.add([1; 20], OBJ_TREE, b"base tree");
-        let o_d1 = pack.add_ofs_delta([2; 20], o_base, b"first delta result");
-        let o_d2 = pack.add_ofs_delta([3; 20], o_d1, b"second, on the first");
-        let o_ref = pack.add_ref_delta([4; 20], [1; 20], b"ref delta result");
+        let o_base = pack.add([1; HASH_LEN], OBJ_TREE, b"base tree");
+        let o_d1 = pack.add_ofs_delta([2; HASH_LEN], o_base, b"first delta result");
+        let o_d2 = pack.add_ofs_delta([3; HASH_LEN], o_d1, b"second, on the first");
+        let o_ref = pack.add_ref_delta([4; HASH_LEN], [1; HASH_LEN], b"ref delta result");
         let (data, index) = pack.finish();
         let (entries, graph) = scan_pack(&data, &index).unwrap();
         let copies: Vec<ObjectCopy> = entries
@@ -1377,11 +1381,11 @@ mod tests {
         let d = shifted(&c, b"+d");
         let e = shifted(&a, b"+e");
         let mut pack = PackBuilder::new();
-        let o_a = pack.add([1; 20], OBJ_TREE, &a);
-        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
-        let o_c = pack.add_ofs_shift([3; 20], o_b, &b, b"+c");
-        pack.add_ofs_shift([4; 20], o_c, &c, b"+d");
-        pack.add_ofs_shift([5; 20], o_a, &a, b"+e");
+        let o_a = pack.add([1; HASH_LEN], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; HASH_LEN], o_a, &a, b"+b");
+        let o_c = pack.add_ofs_shift([3; HASH_LEN], o_b, &b, b"+c");
+        pack.add_ofs_shift([4; HASH_LEN], o_c, &c, b"+d");
+        pack.add_ofs_shift([5; HASH_LEN], o_a, &a, b"+e");
         let (data, index) = pack.finish();
         let (graph, copies) = reader_inputs(&data, &index, &[false, true, true, true, true]);
 
@@ -1426,10 +1430,10 @@ mod tests {
         let c = shifted(&b, b"+c");
         let d = shifted(&a, b"+d");
         let mut pack = PackBuilder::new();
-        let o_a = pack.add([1; 20], OBJ_TREE, &a);
-        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
-        pack.add_ofs_shift([3; 20], o_a, &a, b"+d");
-        pack.add_ofs_shift([4; 20], o_b, &b, b"+c");
+        let o_a = pack.add([1; HASH_LEN], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; HASH_LEN], o_a, &a, b"+b");
+        pack.add_ofs_shift([3; HASH_LEN], o_a, &a, b"+d");
+        pack.add_ofs_shift([4; HASH_LEN], o_b, &b, b"+c");
         let (data, index) = pack.finish();
         let (graph, copies) = reader_inputs(&data, &index, &[false, true, true, true]);
 
@@ -1461,9 +1465,9 @@ mod tests {
         let b = shifted(&a, b"+b");
         let c = shifted(&b, b"+c");
         let mut pack = PackBuilder::new();
-        let o_a = pack.add([1; 20], OBJ_TREE, &a);
-        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
-        pack.add_ofs_shift([3; 20], o_b, &b, b"+c");
+        let o_a = pack.add([1; HASH_LEN], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; HASH_LEN], o_a, &a, b"+b");
+        pack.add_ofs_shift([3; HASH_LEN], o_b, &b, b"+c");
         let (data, index) = pack.finish();
         let (graph, copies) = reader_inputs(&data, &index, &[true, true, true]);
 
@@ -1487,8 +1491,8 @@ mod tests {
         let a = tree(0);
         let b = shifted(&a, b"+b");
         let mut pack = PackBuilder::new();
-        let o_a = pack.add([1; 20], OBJ_TREE, &a);
-        pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
+        let o_a = pack.add([1; HASH_LEN], OBJ_TREE, &a);
+        pack.add_ofs_shift([2; HASH_LEN], o_a, &a, b"+b");
         let (data, index) = pack.finish();
         let (graph, copies) = reader_inputs(&data, &index, &[true, true]);
 
@@ -1506,10 +1510,10 @@ mod tests {
     #[test]
     fn pack_reader_rejects_a_delta_chain_that_is_too_deep() {
         let mut pack = PackBuilder::new();
-        let mut offset = pack.add([0; 20], OBJ_TREE, b"root");
+        let mut offset = pack.add([0; HASH_LEN], OBJ_TREE, b"root");
         let depth = MAX_DELTA_DEPTH + 1;
         for i in 1..=depth {
-            let mut hash = [0u8; 20];
+            let mut hash = [0u8; HASH_LEN];
             hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
             offset = pack.add_ofs_delta(hash, offset, b"next");
         }
@@ -1532,8 +1536,8 @@ mod tests {
         let a = tree(0);
         let r = shifted(&a, b"+r");
         let mut pack = PackBuilder::new();
-        pack.add_ref_shift([2; 20], [1; 20], &a, b"+r");
-        pack.add([1; 20], OBJ_TREE, &a);
+        pack.add_ref_shift([2; HASH_LEN], [1; HASH_LEN], &a, b"+r");
+        pack.add([1; HASH_LEN], OBJ_TREE, &a);
         let (data, index) = pack.finish();
         let (graph, copies) = reader_inputs(&data, &index, &[true, true]);
         assert_eq!(graph.base(0), Some(1), "the base comes after the delta");
@@ -1558,15 +1562,15 @@ mod tests {
         let a = tree(0);
         let b = shifted(&a, b"+b");
         let mut pack = PackBuilder::new();
-        let o_a = pack.add([1; 20], OBJ_TREE, &a);
-        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
-        pack.add_ofs_delta([3; 20], o_a, b"small, on a");
-        let o_c = pack.add_ofs_shift([4; 20], o_b, &b, b"+c");
-        pack.add_ref_delta([5; 20], [8; 20], b"ref delta on the later e");
-        pack.add_ofs_delta([6; 20], o_c, &[b'x'; 300]);
-        pack.add_ofs_delta([7; 20], o_b, b"another on b");
-        pack.add([8; 20], OBJ_TREE, b"e, a whole tree that comes late");
-        pack.add_ofs_delta([9; 20], o_a, &[b'y'; 200]);
+        let o_a = pack.add([1; HASH_LEN], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; HASH_LEN], o_a, &a, b"+b");
+        pack.add_ofs_delta([3; HASH_LEN], o_a, b"small, on a");
+        let o_c = pack.add_ofs_shift([4; HASH_LEN], o_b, &b, b"+c");
+        pack.add_ref_delta([5; HASH_LEN], [8; HASH_LEN], b"ref delta on the later e");
+        pack.add_ofs_delta([6; HASH_LEN], o_c, &[b'x'; 300]);
+        pack.add_ofs_delta([7; HASH_LEN], o_b, b"another on b");
+        pack.add([8; HASH_LEN], OBJ_TREE, b"e, a whole tree that comes late");
+        pack.add_ofs_delta([9; HASH_LEN], o_a, &[b'y'; 200]);
         let (data, index) = pack.finish();
         let primary = [true, false, true, true, true, true, false, true, true];
         let (graph, copies) = reader_inputs(&data, &index, &primary);
@@ -1611,15 +1615,15 @@ mod tests {
         let b = shifted(&a, b"+b");
         let c = shifted(&b, b"+c");
         let mut pack = PackBuilder::new();
-        let o_a = pack.add([1; 20], OBJ_TREE, &a);
-        let o_b = pack.add_ofs_shift([2; 20], o_a, &a, b"+b");
-        pack.add_ofs_delta([3; 20], o_a, b"small, on a");
-        let o_c = pack.add_ofs_shift([4; 20], o_b, &b, b"+c");
-        pack.add_ref_delta([5; 20], [8; 20], b"ref delta on the later e");
-        pack.add_ofs_delta([6; 20], o_c, &[b'x'; 300]);
-        pack.add_ofs_delta([7; 20], o_b, b"another on b");
-        pack.add([8; 20], OBJ_TREE, b"e, a whole tree that comes late");
-        pack.add_ofs_delta([9; 20], o_a, &[b'y'; 200]);
+        let o_a = pack.add([1; HASH_LEN], OBJ_TREE, &a);
+        let o_b = pack.add_ofs_shift([2; HASH_LEN], o_a, &a, b"+b");
+        pack.add_ofs_delta([3; HASH_LEN], o_a, b"small, on a");
+        let o_c = pack.add_ofs_shift([4; HASH_LEN], o_b, &b, b"+c");
+        pack.add_ref_delta([5; HASH_LEN], [8; HASH_LEN], b"ref delta on the later e");
+        pack.add_ofs_delta([6; HASH_LEN], o_c, &[b'x'; 300]);
+        pack.add_ofs_delta([7; HASH_LEN], o_b, b"another on b");
+        pack.add([8; HASH_LEN], OBJ_TREE, b"e, a whole tree that comes late");
+        pack.add_ofs_delta([9; HASH_LEN], o_a, &[b'y'; 200]);
         let (data, index) = pack.finish();
         let primary = [true, false, true, true, true, true, false, true, true];
         let (graph, copies) = reader_inputs(&data, &index, &primary);
@@ -1656,8 +1660,8 @@ mod tests {
     #[test]
     fn scan_pack_does_not_inflate_whole_objects() {
         let mut pack = PackBuilder::new();
-        pack.add_corrupt([1; 20], OBJ_BLOB, 123_456);
-        pack.add_corrupt([2; 20], OBJ_TREE, 77);
+        pack.add_corrupt([1; HASH_LEN], OBJ_BLOB, 123_456);
+        pack.add_corrupt([2; HASH_LEN], OBJ_TREE, 77);
         let (data, index) = pack.finish();
 
         let (entries, _) = scan_pack(&data, &index).unwrap();
@@ -1670,7 +1674,7 @@ mod tests {
     #[test]
     fn scan_pack_rejects_ref_delta_with_missing_base() {
         let mut pack = PackBuilder::new();
-        pack.add_ref_delta([1; 20], [0xee; 20], b"orphan");
+        pack.add_ref_delta([1; HASH_LEN], [0xee; HASH_LEN], b"orphan");
         let (data, index) = pack.finish();
 
         let err = scan_pack(&data, &index).unwrap_err().to_string();
@@ -1681,14 +1685,14 @@ mod tests {
     #[test]
     fn delta_graph_gives_the_position_of_each_base() {
         let mut pack = PackBuilder::new();
-        let o_blob = pack.add([1; 20], OBJ_BLOB, b"base blob");
+        let o_blob = pack.add([1; HASH_LEN], OBJ_BLOB, b"base blob");
         // Position 1: OFS delta on position 0
-        pack.add_ofs_delta([2; 20], o_blob, b"ofs result");
+        pack.add_ofs_delta([2; HASH_LEN], o_blob, b"ofs result");
         // Position 2: REF delta on position 0, a base before it
-        pack.add_ref_delta([3; 20], [1; 20], b"ref back");
+        pack.add_ref_delta([3; HASH_LEN], [1; HASH_LEN], b"ref back");
         // Position 3: REF delta on position 4, a base after it
-        pack.add_ref_delta([4; 20], [5; 20], b"ref forward");
-        pack.add([5; 20], OBJ_TREE, b"later tree");
+        pack.add_ref_delta([4; HASH_LEN], [5; HASH_LEN], b"ref forward");
+        pack.add([5; HASH_LEN], OBJ_TREE, b"later tree");
         let (data, index) = pack.finish();
 
         let (entries, graph) = scan_pack(&data, &index).unwrap();
@@ -1702,8 +1706,8 @@ mod tests {
     #[test]
     fn scan_pack_rejects_ofs_delta_into_the_middle_of_an_entry() {
         let mut pack = PackBuilder::new();
-        let o_blob = pack.add([1; 20], OBJ_BLOB, b"base blob");
-        pack.add_ofs_delta([2; 20], o_blob + 1, b"bad base");
+        let o_blob = pack.add([1; HASH_LEN], OBJ_BLOB, b"base blob");
+        pack.add_ofs_delta([2; HASH_LEN], o_blob + 1, b"bad base");
         let (data, index) = pack.finish();
 
         let err = scan_pack(&data, &index).unwrap_err();
@@ -1720,7 +1724,7 @@ mod tests {
         // read walks the whole chain and the simulation stops at
         // MAX_DELTA_DEPTH. Pass 2 can read a chain of this length.
         let n = MAX_DELTA_DEPTH + 1;
-        let hash = |i: usize| [i as u8 + 1; 20];
+        let hash = |i: usize| [i as u8 + 1; HASH_LEN];
         let mut pack = PackBuilder::new();
         for i in 0..n - 1 {
             pack.add_ref_delta(hash(i), hash(i + 1), b"");
@@ -1754,13 +1758,13 @@ mod tests {
     #[test]
     fn pack_index_offset_of_uses_hash_order() {
         let mut pack = PackBuilder::new();
-        let o9 = pack.add([9; 20], OBJ_BLOB, b"a");
-        let o1 = pack.add([1; 20], OBJ_BLOB, b"b");
+        let o9 = pack.add([9; HASH_LEN], OBJ_BLOB, b"a");
+        let o1 = pack.add([1; HASH_LEN], OBJ_BLOB, b"b");
         let (_, index) = pack.finish();
 
-        assert_eq!(index.offset_of(&[1; 20]), Some(o1));
-        assert_eq!(index.offset_of(&[9; 20]), Some(o9));
-        assert_eq!(index.offset_of(&[5; 20]), None);
+        assert_eq!(index.offset_of(&[1; HASH_LEN]), Some(o1));
+        assert_eq!(index.offset_of(&[9; HASH_LEN]), Some(o9));
+        assert_eq!(index.offset_of(&[5; HASH_LEN]), None);
     }
 
     #[test]

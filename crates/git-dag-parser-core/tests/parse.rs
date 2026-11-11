@@ -580,3 +580,12 @@ fn two_parses_on_the_same_thread_count_are_equal() {
         assert_eq!(second, first);
     }
 }
+
+#[test]
+fn a_sha256_repository_gives_an_error() {
+    let repo = Repo::with_sha256();
+    let err = parse_objects(&repo.git_dir())
+        .err()
+        .expect("parse must fail");
+    assert!(err.to_string().contains("SHA-256"), "wrong error: {err}");
+}

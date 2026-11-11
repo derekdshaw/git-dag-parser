@@ -21,7 +21,7 @@ use super::content::hex_to_hash;
 use super::delta_cache::{pack_reads, simulate_cache};
 use super::loose::read_loose_header;
 use super::pack::{scan_pack, verify_pack_header, DeltaGraph, PackIndex};
-use crate::models::container::{HashIndex, ObjectHash};
+use crate::models::container::{HashIndex, ObjectHash, HEX_HASH_LEN};
 use crate::models::{
     Blob, Commit, ObjectContainer, ObjectCopy, ObjectId, ObjectKind, Pack, Tag, Tree,
 };
@@ -458,6 +458,10 @@ pub fn scan_repository(git_dir: &Path) -> Result<Scanned> {
     })
 }
 
+/// Length of a loose object file name: the hex hash without the two digits
+/// of its directory
+const LOOSE_NAME_LEN: usize = HEX_HASH_LEN - 2;
+
 /// Every loose object file under `objects/xx/`, with its hash
 fn list_loose_objects(objects_dir: &Path) -> Result<Vec<(ObjectHash, PathBuf)>> {
     let mut found = Vec::new();
@@ -477,7 +481,10 @@ fn list_loose_objects(objects_dir: &Path) -> Result<Vec<(ObjectHash, PathBuf)>> 
             let Some(rest) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if !path.is_file() || rest.len() != 38 || !rest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if !path.is_file()
+                || rest.len() != LOOSE_NAME_LEN
+                || !rest.bytes().all(|b| b.is_ascii_hexdigit())
+            {
                 continue;
             }
             let hash = hex_to_hash(format!("{prefix}{rest}").as_bytes())?;
@@ -493,6 +500,7 @@ mod benches {
     use divan::Bencher;
 
     use super::{Scan, ScannedCopy};
+    use crate::models::container::HASH_LEN;
     use crate::models::{ObjectKind, Pack};
 
     /// `n` distinct objects in one pack, arriving in pseudo-random hash
@@ -500,7 +508,7 @@ mod benches {
     fn copies(n: usize) -> Vec<ScannedCopy> {
         (0..n)
             .map(|i| {
-                let mut hash = [0u8; 20];
+                let mut hash = [0u8; HASH_LEN];
                 hash[..8]
                     .copy_from_slice(&(i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).to_be_bytes());
                 let kind = match i % 10 {
@@ -551,6 +559,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
+    use crate::models::container::HASH_LEN;
     use crate::models::ObjectId;
 
     fn touch(path: &Path, contents: &[u8], mtime: i64) {
@@ -634,7 +643,7 @@ mod tests {
         size_disk: u64,
     ) -> ScannedCopy {
         ScannedCopy {
-            hash: [hash; 20],
+            hash: [hash; HASH_LEN],
             kind,
             size: 100,
             pack,
@@ -655,18 +664,18 @@ mod tests {
         scan.record(found(4, ObjectKind::Tree, Some(0), 27, 5));
         scan.record(found(5, ObjectKind::Tag, Some(0), 32, 5));
 
-        assert_eq!(scan.index.get(&[1; 20]), Some(ObjectId::Blob(0)));
-        assert_eq!(scan.index.get(&[3; 20]), Some(ObjectId::Blob(1)));
-        assert_eq!(scan.index.get(&[2; 20]), Some(ObjectId::Commit(0)));
-        assert_eq!(scan.index.get(&[4; 20]), Some(ObjectId::Tree(0)));
-        assert_eq!(scan.index.get(&[5; 20]), Some(ObjectId::Tag(0)));
+        assert_eq!(scan.index.get(&[1; HASH_LEN]), Some(ObjectId::Blob(0)));
+        assert_eq!(scan.index.get(&[3; HASH_LEN]), Some(ObjectId::Blob(1)));
+        assert_eq!(scan.index.get(&[2; HASH_LEN]), Some(ObjectId::Commit(0)));
+        assert_eq!(scan.index.get(&[4; HASH_LEN]), Some(ObjectId::Tree(0)));
+        assert_eq!(scan.index.get(&[5; HASH_LEN]), Some(ObjectId::Tag(0)));
 
         let c = &scan.container;
         assert_eq!(
             (c.commits.len(), c.trees.len(), c.blobs.len(), c.tags.len()),
             (1, 1, 2, 1)
         );
-        assert_eq!(c.blobs[1].hash, [3; 20]);
+        assert_eq!(c.blobs[1].hash, [3; HASH_LEN]);
         assert_eq!(c.blobs[1].index, 1);
         assert_eq!((c.blobs[1].size, c.blobs[1].size_disk), (100, 5));
         assert_eq!(c.copies.len(), 5);
@@ -708,8 +717,8 @@ mod tests {
         scan.record(found(2, ObjectKind::Blob, Some(1), 12, 9));
         scan.record(found(1, ObjectKind::Blob, Some(1), 30, 9));
 
-        assert_eq!(scan.index.get(&[1; 20]), Some(ObjectId::Blob(0)));
-        assert_eq!(scan.index.get(&[2; 20]), Some(ObjectId::Blob(1)));
+        assert_eq!(scan.index.get(&[1; HASH_LEN]), Some(ObjectId::Blob(0)));
+        assert_eq!(scan.index.get(&[2; HASH_LEN]), Some(ObjectId::Blob(1)));
         assert_eq!(scan.primary(ObjectId::Blob(0)), 3);
         assert_eq!(scan.primary(ObjectId::Blob(1)), 2);
         assert_eq!(scan.container.blobs[0].size_disk, 9);
@@ -736,9 +745,9 @@ mod tests {
         assert_eq!(tree_hashes, vec![2, 7]);
         assert!(c.blobs.iter().enumerate().all(|(i, b)| b.index == i));
         assert!(c.trees.iter().enumerate().all(|(i, t)| t.index == i));
-        assert_eq!(scan.index.get(&[9; 20]), Some(ObjectId::Blob(1)));
-        assert_eq!(scan.index.get(&[4; 20]), Some(ObjectId::Blob(0)));
-        assert_eq!(scan.index.get(&[2; 20]), Some(ObjectId::Tree(0)));
+        assert_eq!(scan.index.get(&[9; HASH_LEN]), Some(ObjectId::Blob(1)));
+        assert_eq!(scan.index.get(&[4; HASH_LEN]), Some(ObjectId::Blob(0)));
+        assert_eq!(scan.index.get(&[2; HASH_LEN]), Some(ObjectId::Tree(0)));
 
         // Copies keep their recorded order but point at the new indices
         let objects: Vec<ObjectId> = c.copies.iter().map(|c| c.object()).collect();

@@ -5,7 +5,9 @@
 use anyhow::Result;
 
 use crate::error::ParseError;
-use crate::models::container::{FileKind, HashIndex, ObjectHash, TreeEntriesBuilder};
+use crate::models::container::{
+    FileKind, HashIndex, ObjectHash, TreeEntriesBuilder, HASH_LEN, HEX_HASH_LEN,
+};
 use crate::models::NameStore;
 
 /// Fields of a commit body that pass 2 reads. `parse_objects` resolves the
@@ -95,8 +97,9 @@ pub fn parse_tag(data: &[u8]) -> Result<TagRaw> {
     })
 }
 
-/// Parse tree body entries: `<octal mode> <name>\0<20-byte hash>`, repeated,
-/// recording them in `out` as the entries of tree `tree`. Entry names are
+/// Parse tree body entries: `<octal mode> <name>\0<hash>`, repeated, with a
+/// hash of `HASH_LEN` bytes, recording them in `out` as the entries of tree
+/// `tree`. Entry names are
 /// interned in `names`, and each child hash is resolved to its index in
 /// `index`, which is complete before any body is read.
 pub fn parse_tree(
@@ -128,12 +131,12 @@ pub fn parse_tree(
         let name = names.intern(&data[pos..pos + null_pos])?;
         pos += null_pos + 1;
 
-        if pos + 20 > data.len() {
+        if pos + HASH_LEN > data.len() {
             return Err(ParseError::InvalidObjectFormat("tree entry truncated".into()).into());
         }
 
-        let hash: ObjectHash = data[pos..pos + 20].try_into()?;
-        pos += 20;
+        let hash: ObjectHash = data[pos..pos + HASH_LEN].try_into()?;
+        pos += HASH_LEN;
 
         let kind = FileKind::from_mode(mode).unwrap_or(FileKind::Regular);
         let child = if kind.is_tree() {
@@ -149,13 +152,13 @@ pub fn parse_tree(
     Ok(())
 }
 
-/// Convert 40 hex digits to a hash
+/// Convert `HEX_HASH_LEN` hex digits to a hash
 pub fn hex_to_hash(hex: &[u8]) -> Result<ObjectHash> {
-    if hex.len() != 40 {
+    if hex.len() != HEX_HASH_LEN {
         return Err(ParseError::InvalidObjectFormat("invalid hash length".into()).into());
     }
 
-    let mut hash = [0u8; 20];
+    let mut hash = [0u8; HASH_LEN];
     for (byte, pair) in hash.iter_mut().zip(hex.chunks(2)) {
         let s = std::str::from_utf8(pair)?;
         *byte = u8::from_str_radix(s, 16)
@@ -170,7 +173,7 @@ pub(crate) mod benches {
     use divan::counter::BytesCount;
     use divan::{black_box, Bencher};
 
-    use crate::models::container::{HashIndex, TreeEntriesBuilder};
+    use crate::models::container::{HashIndex, ObjectHash, TreeEntriesBuilder, HASH_LEN};
     use crate::models::{NameStore, ObjectId};
 
     /// A hash index holding every blob the bodies reference, so child
@@ -181,24 +184,25 @@ pub(crate) mod benches {
             let mut pos = 0;
             while pos < body.len() {
                 let null = pos + body[pos..].iter().position(|&b| b == 0).unwrap();
-                let hash: [u8; 20] = body[null + 1..null + 21].try_into().unwrap();
+                let hash: ObjectHash = body[null + 1..null + 1 + HASH_LEN].try_into().unwrap();
                 let next = index.len();
                 if !index.contains(&hash) {
                     index.insert(hash, ObjectId::Blob(next));
                 }
-                pos = null + 21;
+                pos = null + 1 + HASH_LEN;
             }
         }
         index
     }
 
     /// A tree body with `entries` regular files, like one large directory.
-    /// Each entry is 42 bytes: `100644 file_NNNNNN.rs\0` and a 20-byte hash.
+    /// Each entry is `100644 file_NNNNNN.rs\0` (22 bytes) and a hash of
+    /// `HASH_LEN` bytes.
     pub(crate) fn synthetic_tree(entries: usize) -> Vec<u8> {
-        let mut body = Vec::with_capacity(entries * 42);
+        let mut body = Vec::with_capacity(entries * (22 + HASH_LEN));
         for i in 0..entries {
             body.extend_from_slice(format!("100644 file_{i:06}.rs\0").as_bytes());
-            let mut hash = [0u8; 20];
+            let mut hash = [0u8; HASH_LEN];
             hash[..8]
                 .copy_from_slice(&(i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes());
             body.extend_from_slice(&hash);
@@ -251,7 +255,7 @@ pub(crate) mod benches {
         let mut body = Vec::new();
         for i in 0..entries {
             body.extend_from_slice(format!("100644 d{dir:04}_file_{i:02}.rs\0").as_bytes());
-            body.extend_from_slice(&[i as u8; 20]);
+            body.extend_from_slice(&[i as u8; HASH_LEN]);
         }
         body
     }
@@ -389,8 +393,8 @@ mod tests {
 
     #[test]
     fn parse_tree_resolves_children_and_keeps_names_as_bytes() {
-        let blob_hash = [0x11; 20];
-        let tree_hash = [0x22; 20];
+        let blob_hash = [0x11; HASH_LEN];
+        let tree_hash = [0x22; HASH_LEN];
         let mut body = Vec::new();
         body.extend_from_slice(b"100644 caf\xe9.txt\0");
         body.extend_from_slice(&blob_hash);
@@ -417,8 +421,8 @@ mod tests {
 
     #[test]
     fn parse_tree_leaves_submodules_and_missing_objects_childless() {
-        let submodule_hash = [0x33; 20];
-        let missing_hash = [0x44; 20];
+        let submodule_hash = [0x33; HASH_LEN];
+        let missing_hash = [0x44; HASH_LEN];
         let mut body = Vec::new();
         body.extend_from_slice(b"160000 vendored\0");
         body.extend_from_slice(&submodule_hash);
@@ -447,9 +451,9 @@ mod tests {
     fn parse_tree_interns_repeated_names_once() {
         let mut body = Vec::new();
         body.extend_from_slice(b"100644 a\0");
-        body.extend_from_slice(&[1; 20]);
+        body.extend_from_slice(&[1; HASH_LEN]);
         body.extend_from_slice(b"100644 b\0");
-        body.extend_from_slice(&[2; 20]);
+        body.extend_from_slice(&[2; HASH_LEN]);
         let index = HashIndex::new();
         let mut names = NameStore::new();
         let mut out = TreeEntriesBuilder::new();

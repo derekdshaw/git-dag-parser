@@ -40,7 +40,7 @@ The library, in `crates/git-dag-parser-core`:
 
 | File | Contents |
 |---|---|
-| `src/repo.rs` | `find_git_dir`, which finds the Git directory of a repository. |
+| `src/repo.rs` | `find_git_dir`, which finds the Git directory of a repository, and `check_object_format`, which stops the parse of a SHA-256 repository. |
 | `src/parser/mod.rs` | `parse_objects`: pass 1, pass 2, and the last steps. |
 | `src/parser/scan.rs` | Pass 1. |
 | `src/parser/bodies.rs` | Pass 2: the work queue, the workers, and the merge of their results. |
@@ -381,7 +381,7 @@ The parser reads the `object` and `tag` lines.
 
 ## Errors
 
-The library and the program use `anyhow` errors. For most incorrect data in the object store, the error is a `ParseError` (`thiserror`) of the library. If `find_git_dir` finds no Git directory, the error is also a `ParseError`. The two passes and the commands add the object hash or the file name to each error. `DagError` is for the errors of the program.
+The library and the program use `anyhow` errors. For most incorrect data in the object store, the error is a `ParseError` (`thiserror`) of the library. If `find_git_dir` finds no Git directory, the error is also a `ParseError`. The parser reads only SHA-1 hashes. If the `config` file sets `extensions.objectFormat` to `sha256`, `parse_objects` stops with `ParseError::UnsupportedObjectFormat` before it reads an object. The two passes and the commands add the object hash or the file name to each error. `DagError` is for the errors of the program.
 
 ## Tests
 

@@ -4,8 +4,15 @@ use rayon::prelude::*;
 use super::name_store::{NameId, NameMap};
 use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, Tag, Tree};
 
-/// Hash type alias for Git object hashes (20 bytes for SHA-1)
-pub type ObjectHash = [u8; 20];
+/// Length in bytes of a SHA-1 object hash
+pub const HASH_LEN: usize = 20;
+
+/// Length of an object hash in hex, as in commits, tags, refs and loose
+/// object file names
+pub const HEX_HASH_LEN: usize = HASH_LEN * 2;
+
+/// Hash type alias for Git object hashes (`HASH_LEN` bytes for SHA-1)
+pub type ObjectHash = [u8; HASH_LEN];
 
 /// Container for all parsed Git objects
 #[derive(Debug, Default)]
@@ -479,57 +486,57 @@ mod tests {
     #[test]
     fn hash_index_contains_finds_any_type() {
         let mut index = HashIndex::new();
-        index.insert([1; 20], ObjectId::Tree(0));
-        index.insert([2; 20], ObjectId::Tag(0));
+        index.insert([1; HASH_LEN], ObjectId::Tree(0));
+        index.insert([2; HASH_LEN], ObjectId::Tag(0));
 
-        assert!(index.contains(&[1; 20]));
-        assert!(index.contains(&[2; 20]));
-        assert!(!index.contains(&[3; 20]));
+        assert!(index.contains(&[1; HASH_LEN]));
+        assert!(index.contains(&[2; HASH_LEN]));
+        assert!(!index.contains(&[3; HASH_LEN]));
         assert_eq!(index.len(), 2);
     }
 
     #[test]
     fn hash_index_get_returns_typed_id() {
         let mut index = HashIndex::new();
-        index.insert([1; 20], ObjectId::Commit(4));
-        index.insert([2; 20], ObjectId::Blob(9));
+        index.insert([1; HASH_LEN], ObjectId::Commit(4));
+        index.insert([2; HASH_LEN], ObjectId::Blob(9));
 
-        assert_eq!(index.get(&[1; 20]), Some(ObjectId::Commit(4)));
-        assert_eq!(index.get(&[2; 20]), Some(ObjectId::Blob(9)));
-        assert_eq!(index.get(&[3; 20]), None);
+        assert_eq!(index.get(&[1; HASH_LEN]), Some(ObjectId::Commit(4)));
+        assert_eq!(index.get(&[2; HASH_LEN]), Some(ObjectId::Blob(9)));
+        assert_eq!(index.get(&[3; HASH_LEN]), None);
     }
 
     #[test]
     fn hash_index_renumber_changes_each_id_and_keeps_each_hash() {
         let mut index = HashIndex::new();
-        index.insert([1; 20], ObjectId::Commit(4));
-        index.insert([2; 20], ObjectId::Blob(9));
-        index.insert([3; 20], ObjectId::Tree(0));
+        index.insert([1; HASH_LEN], ObjectId::Commit(4));
+        index.insert([2; HASH_LEN], ObjectId::Blob(9));
+        index.insert([3; HASH_LEN], ObjectId::Tree(0));
 
         index.renumber(|id| ObjectId::new(id.kind(), id.index() + 10));
 
         assert_eq!(index.len(), 3);
-        assert_eq!(index.get(&[1; 20]), Some(ObjectId::Commit(14)));
-        assert_eq!(index.get(&[2; 20]), Some(ObjectId::Blob(19)));
-        assert_eq!(index.get(&[3; 20]), Some(ObjectId::Tree(10)));
+        assert_eq!(index.get(&[1; HASH_LEN]), Some(ObjectId::Commit(14)));
+        assert_eq!(index.get(&[2; HASH_LEN]), Some(ObjectId::Blob(19)));
+        assert_eq!(index.get(&[3; HASH_LEN]), Some(ObjectId::Tree(10)));
     }
 
     #[test]
     fn hash_index_typed_lookups_only_match_their_own_kind() {
         let mut index = HashIndex::new();
-        index.insert([1; 20], ObjectId::Commit(4));
-        index.insert([2; 20], ObjectId::Tree(5));
-        index.insert([3; 20], ObjectId::Blob(6));
-        index.insert([4; 20], ObjectId::Tag(7));
+        index.insert([1; HASH_LEN], ObjectId::Commit(4));
+        index.insert([2; HASH_LEN], ObjectId::Tree(5));
+        index.insert([3; HASH_LEN], ObjectId::Blob(6));
+        index.insert([4; HASH_LEN], ObjectId::Tag(7));
 
-        assert_eq!(index.commit(&[1; 20]), Some(4));
-        assert_eq!(index.tree(&[2; 20]), Some(5));
-        assert_eq!(index.blob(&[3; 20]), Some(6));
-        assert_eq!(index.tag(&[4; 20]), Some(7));
+        assert_eq!(index.commit(&[1; HASH_LEN]), Some(4));
+        assert_eq!(index.tree(&[2; HASH_LEN]), Some(5));
+        assert_eq!(index.blob(&[3; HASH_LEN]), Some(6));
+        assert_eq!(index.tag(&[4; HASH_LEN]), Some(7));
 
-        assert_eq!(index.tree(&[1; 20]), None);
-        assert_eq!(index.commit(&[2; 20]), None);
-        assert_eq!(index.blob(&[9; 20]), None);
+        assert_eq!(index.tree(&[1; HASH_LEN]), None);
+        assert_eq!(index.commit(&[2; HASH_LEN]), None);
+        assert_eq!(index.blob(&[9; HASH_LEN]), None);
     }
 
     /// Intern `name` in `store`
@@ -721,18 +728,18 @@ mod tests {
     #[test]
     fn hash_of_reads_the_right_container() {
         let mut container = ObjectContainer::new();
-        container.trees.push(Tree::new(0, [5; 20], 0, 0));
-        container.tags.push(Tag::new(0, [6; 20], 0, 0));
+        container.trees.push(Tree::new(0, [5; HASH_LEN], 0, 0));
+        container.tags.push(Tag::new(0, [6; HASH_LEN], 0, 0));
 
-        assert_eq!(container.hash_of(ObjectId::Tree(0)), [5; 20]);
-        assert_eq!(container.hash_of(ObjectId::Tag(0)), [6; 20]);
+        assert_eq!(container.hash_of(ObjectId::Tree(0)), [5; HASH_LEN]);
+        assert_eq!(container.hash_of(ObjectId::Tag(0)), [6; HASH_LEN]);
     }
 
     #[test]
     fn object_size_reads_the_right_container() {
         let mut container = ObjectContainer::new();
-        container.blobs.push(Blob::new(0, [1; 20], 7, 0));
-        container.trees.push(Tree::new(0, [5; 20], 11, 0));
+        container.blobs.push(Blob::new(0, [1; HASH_LEN], 7, 0));
+        container.trees.push(Tree::new(0, [5; HASH_LEN], 11, 0));
 
         assert_eq!(container.object_size(ObjectId::Blob(0)), 7);
         assert_eq!(container.object_size(ObjectId::Tree(0)), 11);

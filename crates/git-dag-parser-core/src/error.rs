@@ -6,6 +6,9 @@ pub enum ParseError {
     #[error("Not a valid Git repository: {0}")]
     NotAGitRepo(String),
 
+    #[error("SHA-256 repositories are not supported (extensions.objectFormat = sha256)")]
+    UnsupportedObjectFormat,
+
     #[error("Invalid pack file header: expected 'PACK', got {0:?}")]
     InvalidPackHeader([u8; 4]),
 
