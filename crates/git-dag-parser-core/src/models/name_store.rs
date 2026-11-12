@@ -17,7 +17,9 @@ use crate::error::ParseError;
 /// A `NameId` is only meaningful with the store that issued it. The
 /// interner's own symbol type stays inside this module, so the interner
 /// can be swapped out without touching the rest of the crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The order is the order of the ids, not of the name bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NameId(u32);
 
 impl NameId {

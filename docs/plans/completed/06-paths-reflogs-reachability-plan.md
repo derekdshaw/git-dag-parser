@@ -130,6 +130,38 @@ Integration tests (with `Repo` fixtures from `crates/test-fixtures`; the paths a
 - Use a small program in the session scratchpad. Run the reachability oracle on this repository and on the repositories in `docs/benchmarks/README.md`.
 - Report the bytes in each liveness state for each repository.
 
+## Result of this step
+
+Done on 2026-11-12, on the branch `plan-06`.
+
+- Library: `src/parser/reflogs.rs` and `src/parser/index.rs`, `ReflogEntry` in `src/models/objects.rs`, and `reflog_entries` and `index_roots` in `ObjectContainer`. `TreeEntries::names(tree)` gives the `name` slice of one tree. `NameId` has `Ord` (the order of the ids), for the sort of the path keys.
+- Program: `src/paths.rs` (`Paths`, `Path`, `NO_PATH`) and `src/reachability.rs` (`Liveness`, `Reachability`, `Total`). `init` shows the number of distinct paths, the roots, the count and `size_disk` of each liveness state, and the `Paths:` and `Reachability:` times. `harness.py` reads the two times and adds the windows `paths` and `reachability`.
+- Decisions made with the user during this step:
+  - Row 0 of the path table is the empty path: `Path.name` is `Option<NameId>`, and only row 0 has `None`. A top-level path has the parent `Some(0)`.
+  - A split index is read exactly: the parser decodes the EWAH delete and replace bitmaps. On an index of 155,000 entries, `read_index` uses 8–16 ms, with or without a split index, so the decode is not a slow part.
+  - The resolve-undo (`REUC`) blobs are index roots, as in `git rev-list --indexed-objects` and `git gc`.
+- These parts are different from the text above:
+  - The paths oracle uses `git ls-tree -r -t` of each owner commit, not `git rev-list --objects c --not <lower>`, for the reason that step 5 found. An object at two paths in its owner commit is skipped.
+  - Item 3: the paths are made in sequence of depth. `tree_depths` finds the depth of each tree from the introducing parents. Then one sort for each depth finds the objects with the same (parent path, name).
+  - Item 17: the commits get their liveness from one scan in falling rank order, on an array of the parents in rank order. The rank is a topological order. Thus `Reachability::calculate` takes `&Attribution`. A walk in commit index order used approximately 200 ms on linux; the scan uses much less.
+  - Item 18: the trees do not use the frontier rounds of step 5. The walk of the strongest state goes first, and a weaker walk stops at objects that already have a state. Each tree is walked at most one time, and no in-degree pass over all tree entries is necessary.
+- The reachability oracle (`git rev-list --objects --all`, `--indexed-objects`, `--reflog`) gives the same liveness for each object on this repository, lage, zed, git-ms, vscode, linux, and a large monorepo. A sample of up to 100 commits of each repository gives the same paths as `git ls-tree`.
+- The path table, the path ids, and the liveness of each object are the same on 1, 2, 8, and 32 threads (a digest of all of them, on vscode, git-ms, and this repository).
+- Bytes in each liveness state (`size_disk`):
+
+| Repository | Ref | IndexOnly | ReflogOnly | Unreachable |
+|---|---|---|---|---|
+| this repository | 793 objects, 2.17 MB | 0 | 16 objects, 85.04 KB | 122 objects, 491.57 KB |
+| lage | 9,163 objects, 14.05 MB | 0 | 0 | 0 |
+| zed | 286,276 objects, 127.95 MB | 0 | 0 | 0 |
+| git-ms | 781,136 objects, 377.88 MB | 0 | 0 | 11,791 objects, 2.24 MB |
+| vscode | 1,654,196 objects, 933.81 MB | 0 | 117 objects, 29.06 KB | 0 |
+| linux | 10,456,133 objects, 5.04 GB | 0 | 0 | 0 |
+| A large monorepo | 9,193,215 objects, 60.09 GB | 0 | 12,174 objects, 42.10 MB | 2,012 objects, 4.66 MB |
+
+  The work trees of these clones have no staged changes, so no object is `IndexOnly`.
+- Harness on 32 threads (2026-11-12): Paths 0.24 s on vscode, 0.10 s on git-ms, 0.82 s on linux, 0.93 s on the large monorepo; Reachability 0.16 s, 0.11 s, 0.50 s, 0.46 s. The peak heap of `init` did not change (pass 2 has it).
+
 ## Out of scope
 
 - Do not write the database. Step 7 does that.

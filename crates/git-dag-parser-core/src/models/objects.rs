@@ -261,6 +261,28 @@ impl Ref {
     }
 }
 
+/// One line of a reflog file under `logs/`: a ref changed from `old_hash` to
+/// `new_hash`. A reflog entry is not an object, but it keeps both objects
+/// alive until it expires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflogEntry {
+    /// Name of the ref whose log holds the entry, such as `HEAD` or
+    /// `refs/heads/main`, as raw bytes
+    pub ref_name: Vec<u8>,
+    /// Value of the ref before the change; all zeros if the ref was created
+    pub old_hash: ObjectHash,
+    /// Value of the ref after the change; all zeros if the ref was deleted
+    pub new_hash: ObjectHash,
+    /// The object of `old_hash`, if it is in the object store
+    pub old_target: Option<ObjectId>,
+    /// The object of `new_hash`, if it is in the object store
+    pub new_target: Option<ObjectId>,
+    /// Time of the change, seconds since the Unix epoch
+    pub time: i64,
+    /// Text after the tab, such as `commit: fix`, as raw bytes
+    pub message: Vec<u8>,
+}
+
 /// A pack file in `objects/pack/`, so that an object's on-disk copies can be
 /// recorded and retrieved later
 #[derive(Debug, Clone, PartialEq, Eq)]

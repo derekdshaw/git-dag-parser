@@ -7,9 +7,9 @@ The parser reads the Git object store directly. It does not start `git` processe
 1. Pass 1 reads only the object headers. It finds all objects, their types, their sizes, and all copies of each object on disk.
 2. Pass 2 reads the bodies of commits, trees, and tags. It does not read blob bodies.
 
-After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. Pass 2, and the header read and the sorts by hash of pass 1, use more than one thread. The other steps of the parse use one thread.
+After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. It also reads the reflogs and the index file. Pass 2, and the header read and the sorts by hash of pass 1, use more than one thread. The other steps of the parse use one thread.
 
-After the parse, the program ranks the commits and finds the commit that introduced each tree and each blob (see "Attribution").
+After the parse, the program ranks the commits and finds the commit that introduced each tree and each blob (see "Attribution"). Then it finds the path where each tree and blob was added (see "Paths"), and the liveness of each object (see "Reachability").
 
 For the meaning of terms such as work unit, worker, and delta family, refer to "Terms" in [README.md](README.md).
 
@@ -19,7 +19,7 @@ The repository is a Cargo workspace with three crates:
 
 | Crate | Path | Contents |
 |---|---|---|
-| `git-dag-parser` | The root | The program: the command-line arguments, the commands, the attribution, the progress bar, and `DagError`. |
+| `git-dag-parser` | The root | The program: the command-line arguments, the commands, the attribution, the paths, the reachability, the progress bar, and `DagError`. |
 | `git-dag-parser-core` | `crates/git-dag-parser-core` | The parser library: the parser, the data model, `find_git_dir`, the byte sizes, `ParseError`, and the benchmarks. |
 | `test-fixtures` | `crates/test-fixtures` | The `Repo` test fixtures: small repositories that the tests make with `git`, and the output of `git` for them. Cargo does not publish this crate. The other two crates use it only in their tests. |
 
@@ -34,10 +34,12 @@ The program, at the root:
 | `src/main.rs` | Sets the memory allocator, the log output, and the number of threads. Then it runs the command. |
 | `src/cli.rs` | The command-line arguments (`clap`). |
 | `src/progress.rs` | `ProgressLayer`, which draws the progress bar of pass 2 from the progress events of the library. |
-| `src/commands/init.rs` | The `init` command. It finds the Git directory with `find_git_dir`, parses the objects, calculates the attribution, and shows the summary. |
+| `src/commands/init.rs` | The `init` command. It finds the Git directory with `find_git_dir`, parses the objects, calculates the attribution, the paths, and the reachability, and shows the summary. |
 | `src/attribution/mod.rs` | `Attribution`: the corrected date and the rank of each commit, and the commit that introduced each tree and blob. |
 | `src/attribution/rank.rs` | The corrected dates and the rank order of the commits. |
 | `src/attribution/owner.rs` | The owner of each tree and blob, with the frontier method. |
+| `src/paths.rs` | `Paths`: the path table, and the path id of each tree and blob. |
+| `src/reachability.rs` | `Liveness` and `Reachability`: the liveness of each object, and the totals of each state. |
 | `src/commands/analyze.rs`, `src/commands/query.rs` | Commands that show only a message at this time. |
 | `src/error.rs` | `DagError`. |
 
@@ -55,7 +57,9 @@ The library, in `crates/git-dag-parser-core`:
 | `src/parser/loose.rs` | Loose object headers and bodies. |
 | `src/parser/content.rs` | The parsers for commit, tree, and tag bodies, and `CommitRaw`. |
 | `src/parser/refs.rs` | The refs from `packed-refs`, from loose ref files, and from a detached `HEAD`. |
-| `src/models/objects.rs` | `Commit`, `Tree`, `Blob`, `Tag`, `Ref`, `Pack`, `ObjectCopy`, and `ObjectId`. |
+| `src/parser/reflogs.rs` | The reflog entries of `logs/HEAD` and of the files under `logs/refs/`. |
+| `src/parser/index.rs` | The objects that the index file keeps, from index versions 2, 3, and 4, the `TREE` and `REUC` extensions, and a split index. |
+| `src/models/objects.rs` | `Commit`, `Tree`, `Blob`, `Tag`, `Ref`, `ReflogEntry`, `Pack`, `ObjectCopy`, and `ObjectId`. |
 | `src/models/container.rs` | `ObjectContainer`, `HashIndex`, `FileKind`, `TreeEntries`, and `TreeEntriesBuilder`. |
 | `src/models/name_store.rs` | `NameStore`, `NameId`, and `NameMap`. |
 | `src/size.rs` | Byte sizes on the command line and in messages. |
@@ -97,6 +101,8 @@ The library, in `crates/git-dag-parser-core`:
  |   commit root tree and parents -> indices                     |
  |   tag targets -> indices                                      |
  |   read refs, ref targets -> indices                           |
+ |   read reflogs (logs/), old and new hashes -> indices         |
+ |   read the index file, its object hashes -> indices           |
  +---------------------------------------------------------------+
                |
                v
@@ -216,8 +222,20 @@ After pass 2, `parse_objects` does these steps:
 1. For each commit, it finds the index of the root tree and the index of each parent. If a parent is not in the object store, it sets `boundary` to `true`. This occurs at the edge of a shallow clone.
 2. For each annotated tag, it finds the `ObjectId` of the target.
 3. It reads the refs. Then it finds the `ObjectId` of the target of each ref.
+4. It reads the reflogs. Then it finds the `ObjectId` of the old hash and of the new hash of each reflog entry.
+5. It reads the index file. Then it finds the `ObjectId` of each hash that the index file keeps. It sorts these ids and removes the duplicates.
 
 `read_refs` reads `packed-refs`, the loose ref files in `refs/`, and a detached `HEAD`. A loose ref replaces a packed ref with the same name, because Git writes a loose file when it updates a ref. The parser does not keep symbolic refs, because it reads the ref that a symbolic ref refers to.
+
+`read_reflogs` reads `logs/HEAD` and all files under `logs/refs/`, also `logs/refs/stash`, which keeps the older stash entries. It does not read files that end in `.lock`. The logs are in ref name sequence, and the entries of one log are in file sequence (the oldest first). An all-zero hash means that the ref was made or deleted: the entry has no object for it. A line that is not valid is not used, as in Git, and the log shows a warning. The parser does not read the reflogs of linked work trees (`worktrees/*/logs`).
+
+`read_index` reads `index`. If there is no index file, as in a bare repository, it gives no hashes. It gives the hashes that `git rev-list --indexed-objects` uses:
+
+- The hash of each entry. This is usually a blob. For a sparse directory entry (mode `040000`), it is a tree. A submodule entry (mode `160000`) refers to a commit in a different repository, thus the parser does not use it.
+- The tree hash of each valid node of the cache-tree (`TREE` extension). A node that is not valid has the entry count -1 and no hash.
+- The blob hashes of resolve-undo (`REUC` extension). Git keeps the stages of a resolved conflict there, and `git gc` keeps these blobs.
+
+The parser reads index versions 2, 3, and 4. In version 3 and 4, an entry with the extended flag has 2 more bytes of flags. Version 4 compresses the name of each entry against the name of the entry before it. The parser does not make the names, because it uses only the hashes. A split index (`link` extension) keeps most entries in `sharedindex.<hash>`. The `link` extension has two bitmaps in EWAH format: the shared entries that the index deletes, and the shared entries that the first entries of the index replace. The parser uses the shared entries that the index does not delete or replace, and all entries of the index. On an index of 155,000 entries, `read_index` uses approximately 10 ms, with or without a split index. Most of this time is for the read of the file. The parser does not read the index files of linked work trees (`worktrees/*/index`). Hashes that are not in the object store get no `ObjectId`.
 
 ### Result
 
@@ -228,7 +246,7 @@ After pass 2, `parse_objects` does these steps:
 | `tree_entries` | The entries of all trees. |
 | `names` | The entry names that `tree_entries` refers to. |
 | `hash_index` | The `ObjectId` of each hash. |
-| `container` | All objects, copies, pack files, and refs. |
+| `container` | All objects, copies, pack files, refs, reflog entries, and index roots. |
 | `delta_cache` | The delta cache hits, misses, and evictions of pass 2 for each pack, in the sequence of `container.packs`. |
 | `pass1`, `pass2` | The time of pass 1 and of pass 2. |
 
@@ -289,6 +307,67 @@ The `Attribution:` line of `init` on 32 threads (harness, 2026-11-12):
 
 The peak heap of `init` did not change: the parse has the peak, and the attribution arrays use less memory than pass 2 used. On linux, the peak `RssAnon` is 9.03 GB, and 6.50 GB in the attribution. On linux, the corrected dates use 0.6 s of the 1.6 s, because the commit indices are in hash order and each step of Kahn's algorithm goes to a different part of memory.
 
+## Paths
+
+After the attribution, `init` calls `Paths::calculate` (`src/paths.rs`). It finds the path where the owner commit added each tree and each blob (`introduced_at_path`).
+
+### Introducing parent
+
+An object gets its path from its **introducing parent**: a tree that contains the object and has the same owner. This tree always exists for an object that is not the root tree of its owner. Let object `o` have owner `c`. Commit `c` reaches `o` through a tree `T`. If `T` had an owner with a lower rank than `c`, then that commit also reaches `o`, and `o` would have that lower owner. Thus `T` has owner `c`.
+
+The root tree of the owner commit has the empty path. An object that has no owner has no path (`NO_PATH`). If an object has more than one introducing parent, the parent with the lowest (tree index, entry index) gives the path. Tree indices are in hash order, thus the result does not change between runs.
+
+`introducing_parents` finds the introducing parent of all objects in one pass over all tree entries, on all threads. For each entry of tree `T` whose child has the same owner as `T`, it does a `fetch_min` of (`T` << 32 | entry index) on an `AtomicU64` of the child. As in the owner calculation, a thread reads the value first, and does the `fetch_min` only if the new value is smaller.
+
+### Path table
+
+A path is its parent path plus one name. The path table is a prefix tree on the `NameStore`: each `Path` has a `parent`, a `name` (a `NameId`), and a `depth`. Row 0 is the empty path, with no parent, no name, and depth 0. The id of a path is its row. The table does not keep the bytes of the paths.
+
+The calculation makes the paths in sequence of depth:
+
+1. `tree_depths` finds the depth of the path of each tree. Each thread goes up the introducing parents to a tree with a known depth, then sets the depth of each tree on the way.
+2. For each depth `d` from 1, the threads make a key (parent path, name, object) for each tree and blob of depth `d`, and sort the keys. The parent paths have depth `d - 1`, thus they have ids. All objects with the same parent path have the same depth, so one sort finds all objects with the same (parent path, name). Each different (parent path, name) gets a new row.
+3. `sort_table` makes the full bytes of each path from the bytes of its parent, sorts the rows by these bytes, and gives the new ids in that sequence. Then it releases the bytes. Thus the ids do not change between runs.
+
+`Paths::bytes` makes the full bytes of one path from the parent chain.
+
+## Reachability
+
+After the paths, `init` calls `Reachability::calculate` (`src/reachability.rs`). It finds the **liveness** of each commit, tree, blob, and tag. The roots are:
+
+- the target of each ref: `Ref`,
+- each object of the index file: `IndexOnly`,
+- the old and the new object of each reflog entry: `ReflogOnly`.
+
+An object gets the strongest state of the roots that reach it. The sequence is `Unreachable < ReflogOnly < IndexOnly < Ref`: a reflog entry expires, but an index entry stays until the user changes the index. An object that no root reaches is `Unreachable`. The result is one byte for each object, in one array for each object type.
+
+The calculation has three steps:
+
+1. **Roots.** Each root gets its state. A tag gives its state to its target, also to a different tag.
+2. **Commits.** The commit ranks of the attribution are a topological order: a parent has a lower rank than its children. The threads make an array of the parents of each commit as ranks, in rank order. Then one thread reads the commits from the highest rank to the lowest, and gives each parent the strongest state of its children. A commit has its final state when the scan gets to it. On linux, a walk of the parents in commit index order (hash order) used approximately 200 ms on one thread, because each step went to a different part of memory. In rank order, the scan reads the arrays in sequence.
+3. **Trees and blobs.** Each commit gives its state to its root tree. Then the threads walk the trees one level at a time, as in the owner calculation, with `fetch_max`. The walk of the strongest state goes first. A walk of a weaker state stops at an object that already has a state, because the stronger walk also reached all objects below it. Thus each tree is walked at most one time, and the walk does not need the in-degree of the trees. A tree goes into the next level only from the thread whose `fetch_max` changed its state.
+
+`Reachability::totals` gives the number of objects and the sum of `size_disk` in each state.
+
+### Measured times of the paths and the reachability
+
+The `Paths:` and `Reachability:` lines of `init` on 32 threads (harness, 2026-11-12):
+
+| Repository | Distinct paths | Paths | Reachability | Attribution | Parse |
+|---|---|---|---|---|---|
+| vscode | 39,940 | 0.24 s | 0.16 s | 0.18 s | 1.76 s |
+| git-ms | 6,976 | 0.10 s | 0.11 s | 0.17 s | 3.47 s |
+| linux | 160,459 | 0.82 s | 0.50 s | 1.58 s | 12.80 s |
+| A large monorepo | ~0.53 million | 0.93 s | 0.46 s | 0.73 s | 35.1 s |
+
+The peak heap of `init` did not change: pass 2 has the peak. On linux, the peak `RssAnon` is 6.56 GB in the paths and 6.51 GB in the reachability, and 8.89 GB in pass 2.
+
+On linux, these parts use most of the time:
+
+- The pass over all tree entries that finds the introducing parents: approximately 0.31 s.
+- The rounds by depth of the paths: approximately 0.38 s. Of this time, the selection of the objects of each depth and the make of their keys use approximately 0.21 s, the sorts 0.08 s, and the new rows and the path ids 0.10 s.
+- The walk of the trees for the liveness: approximately 0.39 s.
+
 ## Data model
 
 ### Indices, not hashes
@@ -311,6 +390,8 @@ A hash is 20 bytes. An index is 4 bytes or 8 bytes. Thus indices use less memory
 | `packs` | Each `Pack`: name, size, `mtime`, and the `.keep`, cruft, and promisor flags. |
 | `copies` | Each `ObjectCopy`. |
 | `loose_mtimes` | The `mtime` of each loose copy, sorted by `ObjectId`. |
+| `reflog_entries` | Each `ReflogEntry`: ref name, old and new hash, old and new target, time, and message. |
+| `index_roots` | The `ObjectId` of each object that the index file keeps, sorted, with no duplicates. |
 
 Each object has two sizes:
 
@@ -338,7 +419,7 @@ name:  [n4, n9, n2, n4, ...]       NameId of the entry name
 mode:  [1, 0, 4, 1, ...]           FileKind, one byte
 ```
 
-The entries of tree `t` are at positions `start[t]..start[t + 1]`, in the sequence of the tree body. `TreeEntries::entries(t)` gives each entry as (child index, `NameId`, `FileKind`). The `FileKind` tells if the child index is a tree index or a blob index. `TreeEntries::children(t)` gives the `child` and `mode` slices of tree `t`, for work on many entries that does not use the names.
+The entries of tree `t` are at positions `start[t]..start[t + 1]`, in the sequence of the tree body. `TreeEntries::entries(t)` gives each entry as (child index, `NameId`, `FileKind`). The `FileKind` tells if the child index is a tree index or a blob index. `TreeEntries::children(t)` gives the `child` and `mode` slices of tree `t`, for work on many entries that does not use the names. `TreeEntries::names(t)` gives the `name` slice of tree `t`.
 
 Each entry uses 9 bytes: 4 bytes for the child, 4 bytes for the name, and 1 byte for the kind. A large history can have more than 100 million tree entries. For example, the Linux history has approximately 528 million tree entries, which use approximately 4.7 GB.
 
@@ -348,7 +429,7 @@ Each version of a directory has the same entry names again. Thus a large history
 
 The `NameStore` keeps one copy of each different name. Each tree entry keeps a 4-byte `NameId` that refers to its name. The `NameStore` uses the `intaglio` symbol table with the `ahash` hash function.
 
-The `NameStore` keeps names as bytes, because Git does not make it necessary for names to be UTF-8. A `NameId` is correct only with the `NameStore` that made it. In pass 2, each worker has its own `NameStore`, and the merge makes one store from them (see "Merge"). Thus `ParseResult` keeps the `NameStore` with `TreeEntries`, and `ObjectContainer` does not contain a `NameId`.
+The `NameStore` keeps names as bytes, because Git does not make it necessary for names to be UTF-8. A `NameId` is correct only with the `NameStore` that made it. The order of `NameId` values is the order of the ids, not of the name bytes. In pass 2, each worker has its own `NameStore`, and the merge makes one store from them (see "Merge"). Thus `ParseResult` keeps the `NameStore` with `TreeEntries`, and `ObjectContainer` does not contain a `NameId`.
 
 ## Git object formats
 
@@ -439,6 +520,44 @@ tagger <name> <email> <timestamp> <timezone>
 
 The parser reads the `object` and `tag` lines.
 
+### Reflog line
+
+Location: `.git/logs/HEAD` and `.git/logs/refs/...`, one line for each change of the ref.
+
+```
+<old 40-hex hash> <new 40-hex hash> <name> <<email>> <timestamp> <timezone>\t<message>
+```
+
+The tab and the message are optional. The parser reads the two hashes, the timestamp, and the message.
+
+### Index file
+
+Location: `.git/index`. All numbers are big-endian.
+
+```
+"DIRC"              4 bytes
+Version             4 bytes (2, 3, or 4)
+Entry count         4 bytes
+Entries
+Extensions          each: 4-byte signature, 4-byte size, data
+Checksum            20 bytes
+```
+
+Each entry has 40 bytes of times, device, inode, mode, user, group, and size, then the 20-byte hash and 2 bytes of flags. In version 3 and 4, an entry with the extended flag (`0x4000`) has 2 more bytes of flags. Then the name:
+
+- Version 2 and 3: the name and 1 to 8 NUL bytes, so that the entry length is a multiple of 8.
+- Version 4: a variable-length number (how many bytes of the name before to remove), then the rest of the name and one NUL byte.
+
+The parser uses these extensions:
+
+| Signature | Contents |
+|---|---|
+| `TREE` | Cache-tree nodes: `<path>\0<entry count> <subtree count>\n`, then the tree hash if the entry count is not -1. |
+| `REUC` | Resolve-undo records: `<path>\0`, the octal modes of stages 1, 2, and 3, each with a NUL byte, then one hash for each mode that is not 0. |
+| `link` | Split index: the hash of the shared index file, then the delete bitmap and the replace bitmap in EWAH format. |
+
+The parser does not use the other extensions, because they contain no object hashes.
+
 ## Errors
 
 The library and the program use `anyhow` errors. For most incorrect data in the object store, the error is a `ParseError` (`thiserror`) of the library. If `find_git_dir` finds no Git directory, the error is also a `ParseError`. The parser reads only SHA-1 hashes. If the `config` file sets `extensions.objectFormat` to `sha256`, `parse_objects` stops with `ParseError::UnsupportedObjectFormat` before it reads an object. The two passes and the commands add the object hash or the file name to each error. `DagError` is for the errors of the program.
@@ -449,7 +568,7 @@ The tests are at three levels:
 
 - Unit tests are in `#[cfg(test)]` modules in the source files. They use data that the test makes.
 - Integration tests in `crates/git-dag-parser-core/tests/` make small repositories with `git`, with the `Repo` fixtures of `crates/test-fixtures`. They compare the result of the parser with the output of `git`.
-- Integration tests of the program in the root `tests/` use the same fixtures. `tests/attribution.rs` compares the attribution with `git rev-list` and with a walk of the commits in rank order on one thread.
+- Integration tests of the program in the root `tests/` use the same fixtures. `tests/attribution.rs` compares the attribution with `git rev-list` and with a walk of the commits in rank order on one thread. `tests/paths.rs` compares the path of each object with `git ls-tree`. `tests/reachability.rs` compares the liveness of each object with `git rev-list --all`, `--indexed-objects`, and `--reflog`.
 - The `git_oracle` test parses large repositories and compares the result with `git`. It runs only when you tell Cargo to run it.
 
 The CI workflow runs the unit tests and the integration tests on Linux, macOS, and Windows. It does not run `git_oracle` or the benchmarks.

@@ -348,6 +348,6 @@ fn loose_path(objects_dir: &Path, hash: &ObjectHash) -> std::path::PathBuf {
     objects_dir.join(&hex[..2]).join(&hex[2..])
 }
 
-fn hex(hash: &ObjectHash) -> String {
+pub(super) fn hex(hash: &ObjectHash) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }

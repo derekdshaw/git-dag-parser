@@ -100,6 +100,56 @@ impl Repo {
         repo
     }
 
+    /// Objects in each liveness state, and the hashes of some of them by
+    /// name:
+    /// - `amended`: a commit that `git commit --amend` replaced (reflog only)
+    /// - `reset`, `reset blob`: a commit that `git reset --hard HEAD~1`
+    ///   removed, and its new blob (reflog only)
+    /// - `dropped stash`, `dropped stash blob`: the newer of two stashes,
+    ///   which `git stash drop` removed, and its new blob (not reachable)
+    /// - `dangling blob`: from `git hash-object -w` (not reachable)
+    /// - `index blob`, `index tree`: a new file that is staged in
+    ///   `new/dir/`, and the root tree from `git write-tree` (index only)
+    pub fn with_reachability() -> (Self, HashMap<&'static str, String>) {
+        let repo = Self::new();
+        let rev = |r: &str| String::from_utf8(repo.git(&["rev-parse", r])).unwrap();
+        let mut named = HashMap::new();
+        repo.write("a.txt", "a\n");
+        repo.commit("base");
+        repo.write("a.txt", "before the amend\n");
+        repo.commit("to amend");
+        named.insert("amended", rev("HEAD"));
+        repo.git(&["commit", "-q", "--amend", "-m", "amended"]);
+
+        repo.write("reset.txt", "only the reset commit has this\n");
+        repo.commit("to reset");
+        named.insert("reset", rev("HEAD"));
+        named.insert("reset blob", rev("HEAD:reset.txt"));
+        repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
+
+        repo.write("a.txt", "the stash that stays\n");
+        repo.git(&["stash", "-q"]);
+        repo.write("a.txt", "the stash that is dropped\n");
+        repo.git(&["stash", "-q"]);
+        named.insert("dropped stash", rev("stash@{0}"));
+        named.insert("dropped stash blob", rev("stash@{0}:a.txt"));
+        repo.git(&["stash", "drop", "-q"]);
+
+        let blob = repo.git_with_input(&["hash-object", "-w", "--stdin"], b"nothing has this\n");
+        named.insert("dangling blob", String::from_utf8(blob).unwrap());
+
+        // Last, because `stash` and `reset` write the index again
+        repo.write("new/dir/staged.txt", "staged, never committed\n");
+        repo.git(&["add", "new/dir/staged.txt"]);
+        named.insert("index blob", rev(":new/dir/staged.txt"));
+        let tree = repo.git(&["write-tree"]);
+        named.insert("index tree", String::from_utf8(tree).unwrap());
+        for hash in named.values_mut() {
+            *hash = hash.trim().to_string();
+        }
+        (repo, named)
+    }
+
     /// The hash of each commit on any ref, by its subject line
     pub fn commits_by_subject(&self) -> HashMap<String, String> {
         String::from_utf8(self.git(&["log", "--all", "--format=%H %s"]))

@@ -1,8 +1,10 @@
 mod bodies;
 mod content;
 mod delta_cache;
+mod index;
 mod loose;
 mod pack;
+mod reflogs;
 mod refs;
 mod scan;
 mod work;
@@ -35,8 +37,8 @@ pub struct ParseResult {
     pub names: NameStore,
     /// Hash index, for resolving hashes to indices
     pub hash_index: HashIndex,
-    /// Object container, with commit trees and parents, tag targets and refs
-    /// resolved to indices
+    /// Object container, with commit trees and parents, tag targets, refs,
+    /// reflog entries and index roots resolved to indices
     pub container: ObjectContainer,
     /// The delta cache counts of pass 2 for each pack, in the order of
     /// `container.packs`
@@ -101,6 +103,15 @@ pub fn parse_objects_with(git_dir: &Path, options: &ParseOptions) -> Result<Pars
         r.target = hash_index.get(&target_hash);
         container.refs.push(r);
     }
+    container.reflog_entries = reflogs::read_reflogs(git_dir)?;
+    reflogs::resolve(&mut container.reflog_entries, &hash_index);
+    let mut index_roots: Vec<_> = index::read_index(git_dir)?
+        .iter()
+        .filter_map(|hash| hash_index.get(hash))
+        .collect();
+    index_roots.sort_unstable();
+    index_roots.dedup();
+    container.index_roots = index_roots;
 
     Ok(ParseResult {
         tree_entries,

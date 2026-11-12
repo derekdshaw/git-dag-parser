@@ -2,13 +2,13 @@
 
 git-dag-parser reads the object store of a Git repository directly. It does not start `git` processes. Its parser reads the pack files and the loose objects.
 
-The tool helps you find the cause of repository bloat. It finds the commit that introduced each object. When the project is complete, the tool will also give the path of each large object.
+The tool helps you find the cause of repository bloat. It finds the commit that introduced each object, and the path where that commit added it. It also finds the objects that only a reflog or the index keeps, and the objects that `git gc` can remove.
 
 ## Project condition
 
 The project is not complete. At this time, only the `init` command operates.
 
-- `init` parses all objects in the repository, finds the commit that introduced each tree and each blob, and shows a summary. It does not write a file.
+- `init` parses all objects in the repository, finds the commit that introduced each tree and each blob and the path where it was added, finds the reachability state of each object, and shows a summary. It does not write a file.
 - `analyze` and `query` show only a message. When the project is complete, these commands will read a SQLite database that `init` writes.
 
 ## Terms
@@ -58,6 +58,19 @@ The documents and the source code use these terms.
 | Owner, introduced by | For a tree or a blob: the commit with the lowest rank that can reach it. |
 | Frontier | The trees that the threads process in one round of the owner calculation. |
 | In-degree | For a tree: the number of tree entries that point to it. |
+
+**Paths and reachability**
+
+| Term | Meaning |
+|---|---|
+| Name | One entry name in one tree, for example `main.rs`. Git keeps only names. |
+| Path | The names from the root tree of a commit to a file or a directory, for example `src/parser/main.rs`. Git does not keep paths. The root tree has the empty path. |
+| Path table | Each different path one time, as its parent path and its last name. The id of a path is its position in the table, in the sequence of the full path bytes. |
+| Introducing parent | For an object with owner `c`: a tree that contains the object and also has owner `c`. The object gets its path from this tree. |
+| Reflog entry | One line of a file under `.git/logs/`: a ref changed from an old hash to a new hash. |
+| Index file | The file `.git/index`. It lists the staged files with their blob hashes, and it can keep tree hashes (cache-tree) and the blobs of a resolved conflict (resolve-undo). |
+| Root | An object that keeps other objects alive: a ref target, an object of the index file, or the old or new object of a reflog entry. |
+| Liveness | The reachability state of an object: `Ref` (a ref reaches it), `IndexOnly` (only the index file reaches it), `ReflogOnly` (only a reflog entry reaches it), or `Unreachable` (no root reaches it, and `git gc` can remove it). An object gets the strongest state of the roots that reach it, in this sequence: `Ref`, `IndexOnly`, `ReflogOnly`. |
 
 ## Necessary tools
 
@@ -123,23 +136,31 @@ After the program parses the repository, it shows a summary. This is an example 
 
 ```
 === DAG Summary ===
-Commits: 102
-Trees:   324
-Blobs:   472
+Commits: 104
+Trees:   341
+Blobs:   486
 Tags:    0
-Total:   898
-Names:   94 distinct, 2.0 KB
-Tree entries: 2167
+Total:   931
+Names:   98 distinct, 2.1 KB
+Tree entries: 2251
 Delta cache: 0 hits, 0 misses, 0 evictions in 0 packs
-Introduced by a commit: 320 of 324 trees, 367 of 472 blobs
-Corrected commit dates: 7 of 102 commits
+Introduced by a commit: 337 of 341 trees, 381 of 486 blobs
+Corrected commit dates: 7 of 104 commits
+Distinct paths: 134
+Roots: 15 refs, 213 reflog entries, 100 index objects
+Ref:         793 objects, 2.17 MB on disk
+IndexOnly:   0 objects, 0 B on disk
+ReflogOnly:  16 objects, 85.04 KB on disk
+Unreachable: 122 objects, 491.57 KB on disk
 
 === Timing ===
-Pass 1: 28.429506ms
-Pass 2: 13.295366ms
-Parse:  42.467105ms
-Attribution: 47.127445ms
-Total:  89.617112ms
+Pass 1: 24.751838ms
+Pass 2: 13.653169ms
+Parse:  41.135282ms
+Attribution: 45.108021ms
+Paths: 75.936203ms
+Reachability: 46.313318ms
+Total:  208.514845ms
 ```
 
 - `Commits`, `Trees`, `Blobs`, and `Tags` show the number of different objects of each type. The program counts each object one time, also when more than one pack file contains it.
@@ -148,11 +169,14 @@ Total:  89.617112ms
 - `Delta cache` shows the delta cache hits, misses, and evictions of pass 2, for all packs together. In this example, the repository has only loose objects, thus there are no packs.
 - `Introduced by a commit` shows the number of trees and blobs that a commit introduced. The other objects have no owner: no commit reaches them. For example, an annotated tag can refer to them, or an amended commit left them.
 - `Corrected commit dates` shows the number of commits whose corrected date is not equal to their committer time. This includes each commit that has a parent with the same committer time, to the second. On linux, most of these commits are of this type, and only a few have a parent with a later time.
-- `Pass 1` and `Pass 2` show the time of each pass. `Parse` shows the time that the program uses to parse the objects. `Attribution` shows the time of the rank and owner calculation. `Total` shows the time for the full command.
+- `Distinct paths` shows the number of rows in the path table: the paths where the owner commits added their trees and blobs, and the parent directories of these paths. The empty path of the root trees is one of them.
+- `Roots` shows the number of refs, the number of reflog entries in `logs/HEAD` and `logs/refs/`, and the number of different objects that the index file keeps.
+- `Ref`, `IndexOnly`, `ReflogOnly`, and `Unreachable` show the number of objects in each liveness state, and the sum of their sizes on disk. The four lines count each object one time. `git reflog expire` and `git gc` can remove the `ReflogOnly` objects after their reflog entries expire. `git gc` can remove the `Unreachable` objects.
+- `Pass 1` and `Pass 2` show the time of each pass. `Parse` shows the time that the program uses to parse the objects. `Attribution` shows the time of the rank and owner calculation. `Paths` shows the time of the path calculation. `Reachability` shows the time of the liveness calculation. `Total` shows the time for the full command.
 
 ### Threads and memory
 
-Pass 2, the header read and the sorts by hash of pass 1, and the owner calculation use more than one thread. They use a quarter of the hardware threads of the computer. If that is fewer than 8, they use 8 threads. On a computer with 8 hardware threads or fewer, they use one thread fewer than the computer has, so that one stays free. For example, they use 32 threads on 128, 8 on 16, 7 on 8, and 3 on 4. To set a different number, set the `RAYON_NUM_THREADS` environment variable.
+Pass 2, the header read and the sorts by hash of pass 1, the owner calculation, the path calculation, and the walk of the trees in the liveness calculation use more than one thread. They use a quarter of the hardware threads of the computer. If that is fewer than 8, they use 8 threads. On a computer with 8 hardware threads or fewer, they use one thread fewer than the computer has, so that one stays free. For example, they use 32 threads on 128, 8 on 16, 7 on 8, and 3 on 4. To set a different number, set the `RAYON_NUM_THREADS` environment variable.
 
 `--delta-cache-size` sets the byte limit of the delta caches of all threads together. The default is `1gb`. Each thread gets an equal share. A smaller limit uses less memory, but the program can be slower, because it makes more bases again.
 
@@ -183,8 +207,8 @@ cargo test --workspace
 The repository is a Cargo workspace. Without `--workspace`, `cargo test` tests only the program, and not the parser library in `crates/git-dag-parser-core`.
 
 - The unit tests are in the source files, in `#[cfg(test)]` modules.
-- The integration tests of the parser are in `crates/git-dag-parser-core/tests/`. Each test makes a small repository with `git`. Then it compares the parser output with the output of `git`. The tests make the repositories with the `Repo` fixtures of `crates/test-fixtures`.
-- The integration tests of the program are in `tests/`. They use the same fixtures. `tests/attribution.rs` compares the commit that introduced each object with `git rev-list`.
+- The integration tests of the parser are in `crates/git-dag-parser-core/tests/`. Each test makes a small repository with `git`. Then it compares the parser output with the output of `git`. The tests make the repositories with the `Repo` fixtures of `crates/test-fixtures`. `index_and_reflogs.rs` compares the index roots with `git ls-files --stage` and `git write-tree`, and the reflog entries with `git reflog show`.
+- The integration tests of the program are in `tests/`. They use the same fixtures. `tests/attribution.rs` compares the commit that introduced each object with `git rev-list`. `tests/paths.rs` compares the path of each object with `git ls-tree`. `tests/reachability.rs` compares the liveness of each object with `git rev-list --all`, `--indexed-objects`, and `--reflog`.
 
 For each pull request and each push to `main`, the CI workflow (`.github/workflows/ci.yml`) runs the tests, `cargo clippy`, and `cargo fmt --check` for all crates on Linux, macOS, and Windows.
 

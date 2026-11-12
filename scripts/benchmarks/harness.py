@@ -54,6 +54,8 @@ PHASES = {
     "pass2_s": r"Pass 2 \(bodies\):.* in (\S+)$",
     "parse_s": r"^Parse:\s+(\S+)$",
     "attribution_s": r"^Attribution:\s+(\S+)$",
+    "paths_s": r"^Paths:\s+(\S+)$",
+    "reachability_s": r"^Reachability:\s+(\S+)$",
     "total_s": r"^Total:\s+(\S+)$",
 }
 
@@ -145,12 +147,16 @@ def main() -> None:
         end = result.get("total_s") or wall
         parse = result.get("parse_s") or end
         attribution = parse + (result.get("attribution_s") or 0)
+        paths = attribution + (result.get("paths_s") or 0)
+        reachability = paths + (result.get("reachability_s") or 0)
         windows = {
             "pass1": (0, p1),
             "pass2": (p1, p2),
             "resolve_refs": (p2, parse),
             "attribution": (parse, attribution),
-            "summary": (attribution, end + 1),
+            "paths": (attribution, paths),
+            "reachability": (paths, reachability),
+            "summary": (reachability, end + 1),
         }
         for name, (lo, hi) in windows.items():
             vals = [a for t, a in timeline if lo <= t < hi]

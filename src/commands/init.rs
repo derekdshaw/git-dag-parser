@@ -9,6 +9,8 @@ use git_dag_parser_core::repo;
 use git_dag_parser_core::size::format_size;
 
 use crate::attribution::{Attribution, NOT_INTRODUCED};
+use crate::paths::Paths;
+use crate::reachability::{Liveness, Reachability};
 
 /// Run the init command: parse a Git repository and summarize what it holds
 pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
@@ -39,12 +41,26 @@ pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
         attribution.rounds, attribution_elapsed
     );
 
+    info!("Finding the path where each object was introduced...");
+    let paths_start = Instant::now();
+    let paths = Paths::calculate(&parsed, &attribution);
+    let paths_elapsed = paths_start.elapsed();
+
+    info!("Finding the objects that refs, the index and reflogs keep...");
+    let reachability_start = Instant::now();
+    let reachability = Reachability::calculate(&parsed, &attribution);
+    let reachability_elapsed = reachability_start.elapsed();
+
     print_summary(
         &parsed,
         &attribution,
+        &paths,
+        &reachability,
         Timing {
             parse: parse_elapsed,
             attribution: attribution_elapsed,
+            paths: paths_elapsed,
+            reachability: reachability_elapsed,
             total: start.elapsed(),
         },
     );
@@ -56,15 +72,23 @@ pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
 struct Timing {
     parse: Duration,
     attribution: Duration,
+    paths: Duration,
+    reachability: Duration,
     total: Duration,
 }
 
 /// Print a summary of the parsed objects
 ///
-/// `scripts/benchmarks/harness.py` reads the `Parse:`, `Attribution:` and
-/// `Total:` lines of the timing section, and takes the last `Total:` line.
-/// Keep them last.
-fn print_summary(parsed: &ParseResult, attribution: &Attribution, timing: Timing) {
+/// `scripts/benchmarks/harness.py` reads the `Parse:`, `Attribution:`,
+/// `Paths:`, `Reachability:` and `Total:` lines of the timing section, and
+/// takes the last `Total:` line. Keep them last.
+fn print_summary(
+    parsed: &ParseResult,
+    attribution: &Attribution,
+    paths: &Paths,
+    reachability: &Reachability,
+    timing: Timing,
+) {
     let ParseResult {
         tree_entries,
         names,
@@ -116,11 +140,30 @@ fn print_summary(parsed: &ParseResult, attribution: &Attribution, timing: Timing
         attribution.corrected_commits,
         container.commits.len()
     );
+    println!("Distinct paths: {}", paths.paths.len());
+    println!(
+        "Roots: {} refs, {} reflog entries, {} index objects",
+        container.refs.len(),
+        container.reflog_entries.len(),
+        container.index_roots.len()
+    );
+    let totals = reachability.totals(container);
+    for l in Liveness::ALL.into_iter().rev() {
+        let total = totals[l as usize];
+        println!(
+            "{:<12} {} objects, {} on disk",
+            format!("{l:?}:"),
+            total.count,
+            format_size(total.size_disk)
+        );
+    }
 
     println!("\n=== Timing ===");
     println!("Pass 1: {:?}", pass1);
     println!("Pass 2: {:?}", pass2);
     println!("Parse:  {:?}", timing.parse);
     println!("Attribution: {:?}", timing.attribution);
+    println!("Paths: {:?}", timing.paths);
+    println!("Reachability: {:?}", timing.reachability);
     println!("Total:  {:?}", timing.total);
 }

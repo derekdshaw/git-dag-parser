@@ -2,7 +2,7 @@ use hashbrown::HashMap;
 use rayon::prelude::*;
 
 use super::name_store::{NameId, NameMap};
-use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, Tag, Tree};
+use super::objects::{Blob, Commit, ObjectCopy, ObjectId, Pack, Ref, ReflogEntry, Tag, Tree};
 
 /// Length in bytes of a SHA-1 object hash
 pub const HASH_LEN: usize = 20;
@@ -34,6 +34,12 @@ pub struct ObjectContainer {
     /// Modification time of each loose copy, by object, sorted by object.
     /// An object has at most one loose copy.
     pub loose_mtimes: Vec<(ObjectId, i64)>,
+    /// Every reflog entry of `logs/HEAD` and `logs/refs/`, by ref name, each
+    /// log in file order (oldest first)
+    pub reflog_entries: Vec<ReflogEntry>,
+    /// Objects that `.git/index` keeps: entry blobs, sparse directory trees,
+    /// cache-tree trees and resolve-undo blobs, sorted, with no duplicates
+    pub index_roots: Vec<ObjectId>,
 }
 
 impl ObjectContainer {
@@ -53,6 +59,8 @@ impl ObjectContainer {
             packs: Vec::new(),
             copies: Vec::new(),
             loose_mtimes: Vec::new(),
+            reflog_entries: Vec::new(),
+            index_roots: Vec::new(),
         }
     }
 
@@ -321,6 +329,12 @@ impl TreeEntries {
     pub fn children(&self, tree: usize) -> (&[u32], &[u8]) {
         let range = self.start[tree] as usize..self.start[tree + 1] as usize;
         (&self.child[range.clone()], &self.mode[range])
+    }
+
+    /// The entry names of one tree, in entry order
+    #[inline]
+    pub fn names(&self, tree: usize) -> &[NameId] {
+        &self.name[self.start[tree] as usize..self.start[tree + 1] as usize]
     }
 }
 
