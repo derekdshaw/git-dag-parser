@@ -119,8 +119,7 @@ impl NameMap {
     }
 
     /// A map that keeps each of `len` ids, for one store that is used as
-    /// it is
-    #[cfg(test)]
+    /// it is, as when tests build `TreeEntries` with one builder
     pub fn identity(len: usize) -> Self {
         Self((0..len as u32).map(NameId).collect())
     }

@@ -1,5 +1,7 @@
 # Step 5: Commit rank and parallel attribution
 
+All items are done (2026-11-12). See "Result of this step".
+
 ## Summary
 
 This step finds the commit that added each tree and each blob. This commit is the **owner** of the object.
@@ -70,7 +72,7 @@ A commit can reach `o` only if `o` is its root tree, or if the commit can reach 
 6. In `owner.rs`, calculate the owner of each tree and blob. Use `rayon` parallel iterators on borrowed data:
    - The workers borrow `&TreeEntries`, the commit ranks, and the `AtomicU32` arrays for owner and in-degree. `rayon` returns only after all workers are done, so the data does not have to be `'static`.
    - Do not use `Arc`, `thread::spawn`, or a channel. The workers write their results with atomic operations. Nothing is sent back, and nothing is merged.
-   - The values must be atomic because many trees contain the same child, and different workers process these trees at the same time. Also, exactly one worker must see the in-degree of a child become 0, so that the child goes into the next frontier one time. Do not give each worker its own arrays and merge them after each round: on 1JS, full arrays are approximately 50 MB for each thread, and they must be merged after each round. Also, a list of `(child, owner)` pairs is approximately 5 GB.
+   - The values must be atomic because many trees contain the same child, and different workers process these trees at the same time. Also, exactly one worker must see the in-degree of a child become 0, so that the child goes into the next frontier one time. Do not give each worker its own arrays and merge them after each round: on a large monorepo, full arrays are approximately 50 MB for each thread, and they must be merged after each round. Also, a list of `(child, owner)` pairs is approximately 5 GB.
    - Use `Ordering::Relaxed` for all atomic operations. The `rayon` call of each round returns only after all its workers are done, so all writes of a round are visible to the next round.
    - This calculation does not use the `NameStore`. Do not remove it: step 6 uses it for paths, and step 7 writes the names.
    1. Make `owner: Vec<AtomicU32>` for trees and for blobs. Set each value to `u32::MAX`.
@@ -127,6 +129,18 @@ Integration tests (in the root `tests/`, with new `Repo` fixtures in `crates/tes
 - Run the harness on vscode and git-ms. Compare the time of the rank and owner calculation with the old `build_relationships` (harness, commit `b50d421`): vscode 8.0 s, git-ms 10.3 s. For scale, the parse after step 4.1 is 1.3–1.5 s on vscode and 2.8–2.9 s on git-ms (32 threads).
 - Run the harness on linux (see `docs/benchmarks/README.md`) with `--limit-gb 48`. Do not write to that repository. Record the number of frontier rounds, the time, the peak `RssAnon` of the `attribution` window, and the number of commits where the corrected date is not equal to the committer time. After step 4.1 the peak of the linux parse is 8.94–9.10 GB on 32 threads; each array of this step has 4 bytes for each tree, blob, or commit (8 bytes for the corrected date) (10.5 million objects on linux in all).
 - `harness.py` gives `init` only `RUST_LOG` and `PATH`, so `RAYON_NUM_THREADS` does not change the thread count of its runs. It samples `RssAnon` every 0.2 s, which is too slow for a run of less than about 1 s, such as zed.
+
+## Result of this step
+
+Done on 2026-11-12, on the branch `plan-05`.
+
+- `src/attribution/` (`mod.rs`, `rank.rs`, `owner.rs`) is in the application crate. `Attribution::calculate(&ParseResult)` gives `corrected_date`, `rank`, `tree_introduced_by`, `blob_introduced_by`, `corrected_commits`, and `rounds`.
+- Library changes: `TreeEntries::children(tree)` gives the `child` and `mode` slices of one tree. `NameMap::identity` is public, so that the tests of the application can make `TreeEntries` with `TreeEntries::merge`.
+- Oracle 1 is different from the text above. `git rev-list --objects c --not <lower>` takes away only the objects of the lower commits that are parents of the commits it walks. It does not take away the objects of a commit on a sibling branch. Thus the test gets the objects of each commit with `git rev-list --objects c`, and takes away the objects of all commits with a lower rank.
+- Oracle 2 (a walk on one thread, with a "seen" set) gives the same result on this repository, lage, zed, vscode, git-ms, linux, and a large monorepo (approximately 4.1 million trees, 4.8 million blobs, and 663 million tree entries). The result is the same on 1, 2, 8, 16, and 32 threads.
+- Harness on 32 threads (2026-11-12): vscode 0.18 s (12 rounds), git-ms 0.15 s (8 rounds), linux 1.60 s (14 rounds), the large monorepo 0.83 s (17 rounds). Before step 4.1, `build_relationships` used 8.0 s on vscode and 10.3 s on git-ms.
+- Linux: the peak `RssAnon` of the run is 9.03 GB (in the parse), and 6.50 GB in the `attribution` window. 593,467 of 1,309,717 commits have a corrected date that is not their committer time. 466,462 of them have a parent with the same committer time, to the second. Only 807 have a parent with a later time.
+- On linux, the corrected dates use 0.6 s of the 1.6 s. The commit indices are in hash order, so each step of Kahn's algorithm goes to a different part of memory.
 
 ## Out of scope
 

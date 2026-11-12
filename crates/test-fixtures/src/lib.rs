@@ -52,6 +52,66 @@ impl Repo {
         repo
     }
 
+    /// A history for attribution: a rename, an empty commit, the same new
+    /// file on two branches, a `--no-ff` merge of them, and a revert that
+    /// brings back an old blob. Also a blob and a tree that only annotated
+    /// tags reach.
+    pub fn with_attribution_history() -> Self {
+        let repo = Self::new();
+        repo.write("a.txt", "a\n");
+        repo.write("dir/b.txt", "b v1\n");
+        repo.commit("base");
+        repo.git(&["mv", "a.txt", "c.txt"]);
+        repo.commit("rename a to c");
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "empty"]);
+
+        repo.git(&["checkout", "-q", "-b", "side"]);
+        repo.write("same.txt", "the same on two branches\n");
+        repo.commit("same file on side");
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("same.txt", "the same on two branches\n");
+        repo.commit("same file on main");
+        repo.git(&["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+
+        repo.write("dir/b.txt", "b v2\n");
+        repo.commit("change b");
+        repo.git(&["revert", "--no-edit", "HEAD"]);
+
+        let blob = repo.git_with_input(
+            &["hash-object", "-w", "--stdin"],
+            b"only a tag reaches this\n",
+        );
+        let blob = String::from_utf8(blob).unwrap();
+        let blob = blob.trim();
+        repo.git(&["tag", "-a", "blob-tag", "-m", "a tag of a blob", blob]);
+        let tree = repo.git_with_input(
+            &["mktree"],
+            format!("100644 blob {blob}\tonly.txt\n").as_bytes(),
+        );
+        let tree = String::from_utf8(tree).unwrap();
+        repo.git(&[
+            "tag",
+            "-a",
+            "tree-tag",
+            "-m",
+            "a tag of a tree",
+            tree.trim(),
+        ]);
+        repo
+    }
+
+    /// The hash of each commit on any ref, by its subject line
+    pub fn commits_by_subject(&self) -> HashMap<String, String> {
+        String::from_utf8(self.git(&["log", "--all", "--format=%H %s"]))
+            .unwrap()
+            .lines()
+            .map(|l| {
+                let (hash, subject) = l.split_once(' ').unwrap();
+                (subject.to_string(), hash.to_string())
+            })
+            .collect()
+    }
+
     /// `git init` with `extra` arguments in a new temporary directory
     fn init(extra: &[&str]) -> Self {
         let tmp = TempDir::new().unwrap();

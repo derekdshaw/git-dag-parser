@@ -7,7 +7,9 @@ The parser reads the Git object store directly. It does not start `git` processe
 1. Pass 1 reads only the object headers. It finds all objects, their types, their sizes, and all copies of each object on disk.
 2. Pass 2 reads the bodies of commits, trees, and tags. It does not read blob bodies.
 
-After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. Pass 2, and the header read and the sorts by hash of pass 1, use more than one thread. The other steps use one thread.
+After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. Pass 2, and the header read and the sorts by hash of pass 1, use more than one thread. The other steps of the parse use one thread.
+
+After the parse, the program ranks the commits and finds the commit that introduced each tree and each blob (see "Attribution").
 
 For the meaning of terms such as work unit, worker, and delta family, refer to "Terms" in [README.md](README.md).
 
@@ -17,7 +19,7 @@ The repository is a Cargo workspace with three crates:
 
 | Crate | Path | Contents |
 |---|---|---|
-| `git-dag-parser` | The root | The program: the command-line arguments, the commands, the progress bar, and `DagError`. |
+| `git-dag-parser` | The root | The program: the command-line arguments, the commands, the attribution, the progress bar, and `DagError`. |
 | `git-dag-parser-core` | `crates/git-dag-parser-core` | The parser library: the parser, the data model, `find_git_dir`, the byte sizes, `ParseError`, and the benchmarks. |
 | `test-fixtures` | `crates/test-fixtures` | The `Repo` test fixtures: small repositories that the tests make with `git`, and the output of `git` for them. Cargo does not publish this crate. The other two crates use it only in their tests. |
 
@@ -32,7 +34,10 @@ The program, at the root:
 | `src/main.rs` | Sets the memory allocator, the log output, and the number of threads. Then it runs the command. |
 | `src/cli.rs` | The command-line arguments (`clap`). |
 | `src/progress.rs` | `ProgressLayer`, which draws the progress bar of pass 2 from the progress events of the library. |
-| `src/commands/init.rs` | The `init` command. It finds the Git directory with `find_git_dir`, parses the objects, and shows the summary. |
+| `src/commands/init.rs` | The `init` command. It finds the Git directory with `find_git_dir`, parses the objects, calculates the attribution, and shows the summary. |
+| `src/attribution/mod.rs` | `Attribution`: the corrected date and the rank of each commit, and the commit that introduced each tree and blob. |
+| `src/attribution/rank.rs` | The corrected dates and the rank order of the commits. |
+| `src/attribution/owner.rs` | The owner of each tree and blob, with the frontier method. |
 | `src/commands/analyze.rs`, `src/commands/query.rs` | Commands that show only a message at this time. |
 | `src/error.rs` | `DagError`. |
 
@@ -229,6 +234,61 @@ After pass 2, `parse_objects` does these steps:
 
 The `CommitRaw` records are not in the result. After the last steps, each `Commit` has its tree, parents, and commit time as indices and values.
 
+## Attribution
+
+After the parse, `init` calls `Attribution::calculate` (`src/attribution/`). It finds the commit that introduced each tree and each blob. This commit is the **owner** of the object.
+
+### Rank
+
+The **corrected date** of a commit is the larger of these two values:
+
+- its committer time,
+- the largest corrected date of its parents, plus 1.
+
+Thus the corrected date of a commit is always larger than the corrected date of each parent. Git commit-graph files use the same value. `rank.rs` calculates it with Kahn's algorithm: a commit is done when all its parents are done. It does not use recursion. A parent that is not in the object store is not in `Commit.parents`, thus a commit at a shallow clone boundary starts from its own time. If the commit graph has a cycle, the calculation stops with an error.
+
+The **rank** of a commit is its position when the commits are sorted by (corrected date, hash). The commit indices are in hash order, so the sort uses (corrected date, index). An ancestor always has a lower rank than its descendants. The hash is used only for commits that are not ancestors of each other.
+
+The summary shows the number of commits whose corrected date is not equal to their committer time. This number is not only the commits with a clock error. It also includes each commit that has a parent with the same committer time, to the second, as when a tool such as `git am` or `git rebase` makes many commits in one second. On linux (2026-11-12), 593,467 of 1,309,717 commits have a corrected date: 466,462 have a parent with the same time, and only 807 have a parent with a later time.
+
+### Owner
+
+The owner of a tree or blob is the commit with the lowest rank that can reach it:
+
+```
+owner(o) = min( rank(c) for each commit c with root tree o,
+                owner(T) for each tree T that contains o )
+```
+
+A merge never owns an object that a parent has, because the parent has a lower rank. A rename, an empty commit, and a revert own no old blobs. An object that only an annotated tag reaches, and an object that nothing reaches, has no owner (`NOT_INTRODUCED`).
+
+### Frontier method
+
+`owner.rs` does not walk the tree of each commit. It moves through the tree graph one level at a time:
+
+1. It sets the owner of each root tree to the lowest rank of the commits that have that tree.
+2. It counts the **in-degree** of each tree: the number of tree entries that point to it, also duplicates.
+3. The first **frontier** is all trees with in-degree 0. This includes the trees that no commit reaches.
+4. In each round, the threads process the entries of the frontier trees. For each entry of tree `T`, the owner of the child becomes the minimum of its value and the owner of `T`. If the child is a tree, its in-degree decreases by 1. A tree whose in-degree becomes 0 goes into the next frontier.
+5. The calculation stops when the frontier is empty.
+
+A tree goes into a frontier only when all trees that contain it are done. Thus its owner is final when the threads process its entries. Each entry is processed two times in all: one time for the in-degree, and one time in a round. The number of rounds is the depth of the tree graph.
+
+The owner and in-degree values are `AtomicU32`, because many trees contain the same child, and different threads process these trees at the same time. All atomic operations use `Ordering::Relaxed`: each round returns only after all its tasks are done, so the next round sees all writes. Before a `fetch_min`, a thread reads the value, and does the `fetch_min` only if the new value is smaller. Most shared children get their owner from the first tree, so most entries do only a read. A tree with many entries is cut into tasks of `ENTRY_CHUNK` (16,384) entries. The result is the same for each number of threads, because `min` gives the same result in any sequence.
+
+### Measured times
+
+The `Attribution:` line of `init` on 32 threads (harness, 2026-11-12):
+
+| Repository | Commits | Trees | Blobs | Tree entries | Rounds | Attribution | Parse |
+|---|---|---|---|---|---|---|---|
+| vscode | 134,232 | 1,112,371 | 407,657 | 20,296,692 | 12 | 0.18 s | 1.70 s |
+| git-ms | 216,599 | 368,707 | 206,612 | 147,106,148 | 8 | 0.15 s | 3.21 s |
+| linux | 1,309,717 | 6,303,183 | 2,842,379 | 527,520,874 | 14 | 1.60 s | 12.43 s |
+| A large monorepo | ~0.29 million | ~4.1 million | ~4.8 million | ~663 million | 17 | 0.83 s | 28–39 s |
+
+The peak heap of `init` did not change: the parse has the peak, and the attribution arrays use less memory than pass 2 used. On linux, the peak `RssAnon` is 9.03 GB, and 6.50 GB in the attribution. On linux, the corrected dates use 0.6 s of the 1.6 s, because the commit indices are in hash order and each step of Kahn's algorithm goes to a different part of memory.
+
 ## Data model
 
 ### Indices, not hashes
@@ -278,7 +338,7 @@ name:  [n4, n9, n2, n4, ...]       NameId of the entry name
 mode:  [1, 0, 4, 1, ...]           FileKind, one byte
 ```
 
-The entries of tree `t` are at positions `start[t]..start[t + 1]`, in the sequence of the tree body. `TreeEntries::entries(t)` gives each entry as (child index, `NameId`, `FileKind`). The `FileKind` tells if the child index is a tree index or a blob index.
+The entries of tree `t` are at positions `start[t]..start[t + 1]`, in the sequence of the tree body. `TreeEntries::entries(t)` gives each entry as (child index, `NameId`, `FileKind`). The `FileKind` tells if the child index is a tree index or a blob index. `TreeEntries::children(t)` gives the `child` and `mode` slices of tree `t`, for work on many entries that does not use the names.
 
 Each entry uses 9 bytes: 4 bytes for the child, 4 bytes for the name, and 1 byte for the kind. A large history can have more than 100 million tree entries. For example, the Linux history has approximately 528 million tree entries, which use approximately 4.7 GB.
 
@@ -389,6 +449,7 @@ The tests are at three levels:
 
 - Unit tests are in `#[cfg(test)]` modules in the source files. They use data that the test makes.
 - Integration tests in `crates/git-dag-parser-core/tests/` make small repositories with `git`, with the `Repo` fixtures of `crates/test-fixtures`. They compare the result of the parser with the output of `git`.
+- Integration tests of the program in the root `tests/` use the same fixtures. `tests/attribution.rs` compares the attribution with `git rev-list` and with a walk of the commits in rank order on one thread.
 - The `git_oracle` test parses large repositories and compares the result with `git`. It runs only when you tell Cargo to run it.
 
 The CI workflow runs the unit tests and the integration tests on Linux, macOS, and Windows. It does not run `git_oracle` or the benchmarks.
