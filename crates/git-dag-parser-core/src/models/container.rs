@@ -312,6 +312,16 @@ impl TreeEntries {
             )
         })
     }
+
+    /// The children and kinds of the entries of tree `tree`, in body order,
+    /// for work over many entries that needs no names. A kind is
+    /// `FileKind as u8`. A child is `NO_CHILD`, or an index among trees if
+    /// the kind is `FileKind::Tree as u8`, otherwise among blobs.
+    #[inline]
+    pub fn children(&self, tree: usize) -> (&[u32], &[u8]) {
+        let range = self.start[tree] as usize..self.start[tree + 1] as usize;
+        (&self.child[range.clone()], &self.mode[range])
+    }
 }
 
 /// Records the entries of the trees one worker reads, in the order it
@@ -562,6 +572,31 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn children_gives_the_child_and_kind_slices_of_one_tree() {
+        let mut names = NameStore::new();
+        let a = name(&mut names, b"a");
+        let mut builder = TreeEntriesBuilder::new();
+        builder.begin_tree(1);
+        builder.push(Some(4), a, FileKind::Tree);
+        builder.push(None, a, FileKind::Submodule);
+        builder.push(Some(2), a, FileKind::Regular);
+        let entries = merge_one(2, builder, &names);
+
+        assert_eq!(entries.children(0), (&[][..], &[][..]));
+        assert_eq!(
+            entries.children(1),
+            (
+                &[4, TreeEntries::NO_CHILD, 2][..],
+                &[
+                    FileKind::Tree as u8,
+                    FileKind::Submodule as u8,
+                    FileKind::Regular as u8
+                ][..]
+            )
+        );
     }
 
     #[test]

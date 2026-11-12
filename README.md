@@ -2,13 +2,13 @@
 
 git-dag-parser reads the object store of a Git repository directly. It does not start `git` processes. Its parser reads the pack files and the loose objects.
 
-The tool helps you find the cause of repository bloat. When the project is complete, the tool will connect each large object to the commit and the path that added it.
+The tool helps you find the cause of repository bloat. It finds the commit that introduced each object. When the project is complete, the tool will also give the path of each large object.
 
 ## Project condition
 
 The project is not complete. At this time, only the `init` command operates.
 
-- `init` parses all objects in the repository and shows a summary. It does not write a file.
+- `init` parses all objects in the repository, finds the commit that introduced each tree and each blob, and shows a summary. It does not write a file.
 - `analyze` and `query` show only a message. When the project is complete, these commands will read a SQLite database that `init` writes.
 
 ## Terms
@@ -48,6 +48,16 @@ The documents and the source code use these terms.
 | Tree entries | The entries of all trees: for each entry, the index of its child, its name, and its kind. |
 | Name store | Keeps one copy of each different entry name. A tree entry refers to its name by a `NameId`. |
 | Merge | The last step of pass 2. It puts the results of all workers together: one name store, and the tree entries in tree index order. |
+
+**Attribution**
+
+| Term | Meaning |
+|---|---|
+| Corrected date | A commit time that is always larger than the corrected date of each parent: the larger of the committer time and the largest corrected date of the parents plus 1. |
+| Rank | The position of a commit when the commits are sorted by (corrected date, hash). Rank 0 is first. An ancestor always has a lower rank than its descendants. |
+| Owner, introduced by | For a tree or a blob: the commit with the lowest rank that can reach it. |
+| Frontier | The trees that the threads process in one round of the owner calculation. |
+| In-degree | For a tree: the number of tree entries that point to it. |
 
 ## Necessary tools
 
@@ -113,31 +123,36 @@ After the program parses the repository, it shows a summary. This is an example 
 
 ```
 === DAG Summary ===
-Commits: 97
-Trees:   306
-Blobs:   453
+Commits: 102
+Trees:   324
+Blobs:   472
 Tags:    0
-Total:   856
+Total:   898
 Names:   94 distinct, 2.0 KB
-Tree entries: 2075
+Tree entries: 2167
 Delta cache: 0 hits, 0 misses, 0 evictions in 0 packs
+Introduced by a commit: 320 of 324 trees, 367 of 472 blobs
+Corrected commit dates: 7 of 102 commits
 
 === Timing ===
-Pass 1: 205.098386ms
-Pass 2: 18.853383ms
-Parse:  224.750948ms
-Total:  224.763221ms
+Pass 1: 28.429506ms
+Pass 2: 13.295366ms
+Parse:  42.467105ms
+Attribution: 47.127445ms
+Total:  89.617112ms
 ```
 
 - `Commits`, `Trees`, `Blobs`, and `Tags` show the number of different objects of each type. The program counts each object one time, also when more than one pack file contains it.
 - `Names` shows the number of different file names and directory names in all trees. It also shows the total length of these names in kilobytes.
 - `Tree entries` shows the number of entries in all trees.
 - `Delta cache` shows the delta cache hits, misses, and evictions of pass 2, for all packs together. In this example, the repository has only loose objects, thus there are no packs.
-- `Pass 1` and `Pass 2` show the time of each pass. `Parse` shows the time that the program uses to parse the objects. `Total` shows the time for the full command.
+- `Introduced by a commit` shows the number of trees and blobs that a commit introduced. The other objects have no owner: no commit reaches them. For example, an annotated tag can refer to them, or an amended commit left them.
+- `Corrected commit dates` shows the number of commits whose corrected date is not equal to their committer time. This includes each commit that has a parent with the same committer time, to the second. On linux, most of these commits are of this type, and only a few have a parent with a later time.
+- `Pass 1` and `Pass 2` show the time of each pass. `Parse` shows the time that the program uses to parse the objects. `Attribution` shows the time of the rank and owner calculation. `Total` shows the time for the full command.
 
 ### Threads and memory
 
-Pass 2, and the header read and the sorts by hash of pass 1, use more than one thread. They use a quarter of the hardware threads of the computer. If that is fewer than 8, they use 8 threads. On a computer with 8 hardware threads or fewer, they use one thread fewer than the computer has, so that one stays free. For example, they use 32 threads on 128, 8 on 16, 7 on 8, and 3 on 4. To set a different number, set the `RAYON_NUM_THREADS` environment variable.
+Pass 2, the header read and the sorts by hash of pass 1, and the owner calculation use more than one thread. They use a quarter of the hardware threads of the computer. If that is fewer than 8, they use 8 threads. On a computer with 8 hardware threads or fewer, they use one thread fewer than the computer has, so that one stays free. For example, they use 32 threads on 128, 8 on 16, 7 on 8, and 3 on 4. To set a different number, set the `RAYON_NUM_THREADS` environment variable.
 
 `--delta-cache-size` sets the byte limit of the delta caches of all threads together. The default is `1gb`. Each thread gets an equal share. A smaller limit uses less memory, but the program can be slower, because it makes more bases again.
 
@@ -169,6 +184,7 @@ The repository is a Cargo workspace. Without `--workspace`, `cargo test` tests o
 
 - The unit tests are in the source files, in `#[cfg(test)]` modules.
 - The integration tests of the parser are in `crates/git-dag-parser-core/tests/`. Each test makes a small repository with `git`. Then it compares the parser output with the output of `git`. The tests make the repositories with the `Repo` fixtures of `crates/test-fixtures`.
+- The integration tests of the program are in `tests/`. They use the same fixtures. `tests/attribution.rs` compares the commit that introduced each object with `git rev-list`.
 
 For each pull request and each push to `main`, the CI workflow (`.github/workflows/ci.yml`) runs the tests, `cargo clippy`, and `cargo fmt --check` for all crates on Linux, macOS, and Windows.
 

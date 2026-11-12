@@ -53,6 +53,7 @@ PHASES = {
     "pass1_s": r"Pass 1 \(headers\):.* in (\S+)$",
     "pass2_s": r"Pass 2 \(bodies\):.* in (\S+)$",
     "parse_s": r"^Parse:\s+(\S+)$",
+    "attribution_s": r"^Attribution:\s+(\S+)$",
     "total_s": r"^Total:\s+(\S+)$",
 }
 
@@ -142,7 +143,15 @@ def main() -> None:
         p1 = result["pass1_s"]
         p2 = p1 + result["pass2_s"]
         end = result.get("total_s") or wall
-        windows = {"pass1": (0, p1), "pass2": (p1, p2), "resolve_refs": (p2, end + 1)}
+        parse = result.get("parse_s") or end
+        attribution = parse + (result.get("attribution_s") or 0)
+        windows = {
+            "pass1": (0, p1),
+            "pass2": (p1, p2),
+            "resolve_refs": (p2, parse),
+            "attribution": (parse, attribution),
+            "summary": (attribution, end + 1),
+        }
         for name, (lo, hi) in windows.items():
             vals = [a for t, a in timeline if lo <= t < hi]
             result[f"peak_anon_mb_{name}"] = round(max(vals) / 1024, 1) if vals else None

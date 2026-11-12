@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tracing::info;
@@ -7,6 +7,8 @@ use tracing::info;
 use git_dag_parser_core::parser::{self, DeltaCacheStats, ParseOptions, ParseResult};
 use git_dag_parser_core::repo;
 use git_dag_parser_core::size::format_size;
+
+use crate::attribution::{Attribution, NOT_INTRODUCED};
 
 /// Run the init command: parse a Git repository and summarize what it holds
 pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
@@ -28,16 +30,41 @@ pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
         parser::parse_objects_with(&git_dir, options).context("Failed to parse Git objects")?;
     let parse_elapsed = parse_start.elapsed();
 
-    print_summary(&parsed, parse_elapsed, start.elapsed());
+    info!("Ranking commits and finding the commit that introduced each object...");
+    let attribution_start = Instant::now();
+    let attribution = Attribution::calculate(&parsed).context("Failed to rank the commits")?;
+    let attribution_elapsed = attribution_start.elapsed();
+    info!(
+        "Attribution: {} frontier rounds in {:?}",
+        attribution.rounds, attribution_elapsed
+    );
+
+    print_summary(
+        &parsed,
+        &attribution,
+        Timing {
+            parse: parse_elapsed,
+            attribution: attribution_elapsed,
+            total: start.elapsed(),
+        },
+    );
 
     Ok(())
 }
 
+/// Times of the phases of `init`
+struct Timing {
+    parse: Duration,
+    attribution: Duration,
+    total: Duration,
+}
+
 /// Print a summary of the parsed objects
 ///
-/// `scripts/benchmarks/harness.py` reads the `Parse:` and `Total:` lines of
-/// the timing section, and takes the last `Total:` line. Keep them last.
-fn print_summary(parsed: &ParseResult, parse: std::time::Duration, total: std::time::Duration) {
+/// `scripts/benchmarks/harness.py` reads the `Parse:`, `Attribution:` and
+/// `Total:` lines of the timing section, and takes the last `Total:` line.
+/// Keep them last.
+fn print_summary(parsed: &ParseResult, attribution: &Attribution, timing: Timing) {
     let ParseResult {
         tree_entries,
         names,
@@ -76,10 +103,24 @@ fn print_summary(parsed: &ParseResult, parse: std::time::Duration, total: std::t
         cache.evictions,
         delta_cache.len()
     );
+    let introduced = |owners: &[u32]| owners.iter().filter(|&&c| c != NOT_INTRODUCED).count();
+    println!(
+        "Introduced by a commit: {} of {} trees, {} of {} blobs",
+        introduced(&attribution.tree_introduced_by),
+        container.trees.len(),
+        introduced(&attribution.blob_introduced_by),
+        container.blobs.len()
+    );
+    println!(
+        "Corrected commit dates: {} of {} commits",
+        attribution.corrected_commits,
+        container.commits.len()
+    );
 
     println!("\n=== Timing ===");
     println!("Pass 1: {:?}", pass1);
     println!("Pass 2: {:?}", pass2);
-    println!("Parse:  {:?}", parse);
-    println!("Total:  {:?}", total);
+    println!("Parse:  {:?}", timing.parse);
+    println!("Attribution: {:?}", timing.attribution);
+    println!("Total:  {:?}", timing.total);
 }
