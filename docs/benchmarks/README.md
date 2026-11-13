@@ -98,7 +98,7 @@ GDP_ORACLE_REPOS=/path/to/zed:/path/to/vscode:/path/to/git-ms \
 
 These scripts measure the release binary on real repositories:
 
-- `scripts/benchmarks/harness.py` runs `git-dag-parser init` once. It records wall time, CPU time, and page faults (from `/usr/bin/time -v`), samples the heap (`RssAnon`) every 0.2 s, reads the pass 1 and pass 2 timings from the info logs and the `Parse:`, `Attribution:`, and `Total:` timings from the stdout summary, gives the peak heap of each phase window (`pass1`, `pass2`, `resolve_refs`, `attribution`, `summary`), and stops the run above a heap limit or a time limit.
+- `scripts/benchmarks/harness.py` runs `git-dag-parser init` once. It records wall time, CPU time, and page faults (from `/usr/bin/time -v`), samples the heap (`RssAnon`) every 0.2 s, reads the pass 1 and pass 2 timings from the info logs and the `Parse:`, `Attribution:`, `Paths:`, `Reachability:`, and `Total:` timings from the stdout summary, gives the peak heap of each phase window (`pass1`, `pass2`, `resolve_refs`, `attribution`, `paths`, `reachability`, `summary`), and stops the run above a heap limit or a time limit. A window shorter than 0.2 s can have no sample; then its peak is `null`. For example, the `paths` window of git-ms (0.10 s) can have no sample.
   ```
   python3 scripts/benchmarks/harness.py <label> <repo> <out.json> --bin target/release/git-dag-parser --limit-gb 48
   ```
