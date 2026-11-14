@@ -147,16 +147,15 @@ def main() -> None:
         end = result.get("total_s") or wall
         parse = result.get("parse_s") or end
         attribution = parse + (result.get("attribution_s") or 0)
-        paths = attribution + (result.get("paths_s") or 0)
-        reachability = paths + (result.get("reachability_s") or 0)
+        # Paths and reachability run at the same time
+        both = attribution + max(result.get("paths_s") or 0, result.get("reachability_s") or 0)
         windows = {
             "pass1": (0, p1),
             "pass2": (p1, p2),
             "resolve_refs": (p2, parse),
             "attribution": (parse, attribution),
-            "paths": (attribution, paths),
-            "reachability": (paths, reachability),
-            "summary": (reachability, end + 1),
+            "paths_reachability": (attribution, both),
+            "summary": (both, end + 1),
         }
         for name, (lo, hi) in windows.items():
             vals = [a for t, a in timeline if lo <= t < hi]

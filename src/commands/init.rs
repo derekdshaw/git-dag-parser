@@ -1,9 +1,11 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use tracing::info;
 
 use git_dag_parser_core::parser::{self, DeltaCacheStats, ParseOptions, ParseResult};
@@ -43,15 +45,20 @@ pub fn run(repo_path: &Path, options: &ParseOptions) -> Result<()> {
         attribution.rounds, attribution_elapsed
     );
 
-    info!("Finding the path where each object was introduced...");
-    let paths_start = Instant::now();
-    let paths = Paths::calculate(&parsed, &attribution);
-    let paths_elapsed = paths_start.elapsed();
-
-    info!("Finding the objects that refs, the index and reflogs keep...");
-    let reachability_start = Instant::now();
-    let reachability = Reachability::calculate(&parsed, &attribution);
-    let reachability_elapsed = reachability_start.elapsed();
+    info!("Finding paths and the objects that refs, the index and reflogs keep...");
+    let ((paths, paths_elapsed), (reachability, reachability_elapsed)) = rayon::join(
+        || {
+            let start = Instant::now();
+            (Paths::calculate(&parsed, &attribution), start.elapsed())
+        },
+        || {
+            let start = Instant::now();
+            (
+                Reachability::calculate(&parsed, &attribution),
+                start.elapsed(),
+            )
+        },
+    );
 
     let analysis_start = Instant::now();
     let analysis = analyze(&parsed, &attribution, &paths, &reachability);
@@ -119,14 +126,14 @@ fn analyze(
     let mut out = Vec::new();
 
     out.push("Largest blobs (size, disk, state, added by, path):".to_string());
-    for (size, i) in largest(5, c.blobs.iter().map(|b| (b.size, b.index))) {
+    for (size, i) in largest(5, c.blobs.par_iter().map(|b| (b.size, b.index))) {
         out.push(blob_line(size, i));
     }
 
     out.push("Largest blobs that no ref keeps:".to_string());
     let not_ref = c
         .blobs
-        .iter()
+        .par_iter()
         .filter(|b| reachability.blob[b.index] != Liveness::Ref);
     let not_ref = largest(3, not_ref.map(|b| (b.size, b.index)));
     if not_ref.is_empty() {
@@ -137,7 +144,7 @@ fn analyze(
     }
 
     out.push("Largest trees (size, entries, state, added by, path):".to_string());
-    for (size, i) in largest(3, c.trees.iter().map(|t| (t.size, t.index))) {
+    for (size, i) in largest(3, c.trees.par_iter().map(|t| (t.size, t.index))) {
         out.push(format!(
             "  {:>10} {:>8} entries  {:<11}  {}  {}",
             format_size(size),
@@ -148,59 +155,151 @@ fn analyze(
         ));
     }
 
-    // The blob count and bytes that each commit adds and each path holds
-    let mut by_commit = vec![(0u32, 0u64); c.commits.len()];
-    let mut by_path = vec![(0u32, 0u64, 0u64); paths.paths.len()];
-    for b in &c.blobs {
+    // The blobs that each commit adds and each path holds. Each version of
+    // a directory is a new tree, so a directory with many entries and many
+    // changes costs disk space even if each blob in it is small and has one
+    // version: `dir_trees` (with the entry count as its bytes) and
+    // `dir_blobs` (the blobs directly in the directory) show this.
+    let by_commit = sums(c.commits.len());
+    let by_path = sums(paths.paths.len());
+    let dir_trees = sums(paths.paths.len());
+    let dir_blobs = sums(paths.paths.len());
+    c.blobs.par_iter().for_each(|b| {
         if let Some(o) = attribution.blob_introduced_by(b.index) {
-            by_commit[o as usize].0 += 1;
-            by_commit[o as usize].1 += b.size;
+            by_commit[o as usize].add(1, b.size, b.size_disk);
         }
         if let Some(p) = paths.blob_path(b.index) {
-            by_path[p as usize].0 += 1;
-            by_path[p as usize].1 += b.size;
-            by_path[p as usize].2 += b.size_disk;
+            by_path[p as usize].add(1, b.size, b.size_disk);
+            if let Some(parent) = paths.paths[p as usize].parent {
+                dir_blobs[parent as usize].add(1, b.size, b.size_disk);
+            }
         }
-    }
+    });
+    // Each commit has a root tree, so on linux 1.3 M trees add to the same
+    // counters, and the atomic adds of all threads to them took most of the
+    // time. Each chunk adds each of its paths one time.
+    c.trees.par_chunks(1 << 14).for_each(|chunk| {
+        let mut local: Vec<(u32, u64, u64)> = chunk
+            .iter()
+            .filter_map(|t| {
+                let entries = parsed.tree_entries.children(t.index).0.len() as u64;
+                Some((paths.tree_path(t.index)?, entries, t.size_disk))
+            })
+            .collect();
+        local.sort_unstable_by_key(|&(p, _, _)| p);
+        for run in local.chunk_by(|a, b| a.0 == b.0) {
+            let entries = run.iter().map(|r| r.1).sum();
+            let disk = run.iter().map(|r| r.2).sum();
+            dir_trees[run[0].0 as usize].add(run.len() as u64, entries, disk);
+        }
+    });
 
     out.push("Commits that add the most blob data:".to_string());
-    for (size, i) in largest(3, by_commit.iter().map(|&(_, size)| size).zip(0..)) {
+    let bytes = by_commit.par_iter().map(|s| s.get().1);
+    for (size, i) in largest(3, bytes.enumerate().map(|(i, b)| (b, i))) {
         out.push(format!(
             "  {:>10} in {:>7} blobs  {}",
             format_size(size),
-            by_commit[i].0,
+            by_commit[i].get().0,
             commit(i)
         ));
     }
 
     out.push("Paths with the most blob versions:".to_string());
-    let counts = by_path.iter().map(|&(count, _, _)| u64::from(count));
-    for (count, i) in largest(3, counts.zip(0..)) {
+    let counts = by_path.par_iter().map(|s| s.get().0);
+    for (count, i) in largest(3, counts.enumerate().map(|(i, n)| (n, i))) {
+        let (_, size, disk) = by_path[i].get();
         out.push(format!(
             "  {:>7} versions {:>10} {:>10} on disk  {}",
             count,
-            format_size(by_path[i].1),
-            format_size(by_path[i].2),
+            format_size(size),
+            format_size(disk),
+            path(Some(i as u32))
+        ));
+    }
+
+    let all_disk: u64 = c.commits.par_iter().map(|o| o.size_disk).sum::<u64>()
+        + c.trees.par_iter().map(|o| o.size_disk).sum::<u64>()
+        + c.blobs.par_iter().map(|o| o.size_disk).sum::<u64>()
+        + c.tags.par_iter().map(|o| o.size_disk).sum::<u64>();
+    out.push(
+        "Directories with the most data on disk (its trees, the blobs directly in it):".to_string(),
+    );
+    let disk = (0..paths.paths.len())
+        .into_par_iter()
+        .map(|i| (dir_trees[i].get().2 + dir_blobs[i].get().2, i));
+    for (disk, i) in largest(5, disk) {
+        let (trees, entries, tree_disk) = dir_trees[i].get();
+        let (blobs, _, blob_disk) = dir_blobs[i].get();
+        out.push(format!(
+            "  {:>10} on disk ({:>4.1}%)  {:>7} trees {:>10} ({} entries)  {:>7} blobs {:>10}  {}",
+            format_size(disk),
+            100.0 * disk as f64 / all_disk.max(1) as f64,
+            trees,
+            format_size(tree_disk),
+            entries,
+            blobs,
+            format_size(blob_disk),
             path(Some(i as u32))
         ));
     }
     out
 }
 
+/// A count and two byte totals that many threads add to
+#[derive(Default)]
+struct Sum {
+    count: AtomicU64,
+    bytes: AtomicU64,
+    disk: AtomicU64,
+}
+
+impl Sum {
+    fn add(&self, count: u64, bytes: u64, disk: u64) {
+        self.count.fetch_add(count, Relaxed);
+        self.bytes.fetch_add(bytes, Relaxed);
+        self.disk.fetch_add(disk, Relaxed);
+    }
+
+    /// (count, bytes, disk)
+    fn get(&self) -> (u64, u64, u64) {
+        (
+            self.count.load(Relaxed),
+            self.bytes.load(Relaxed),
+            self.disk.load(Relaxed),
+        )
+    }
+}
+
+fn sums(n: usize) -> Vec<Sum> {
+    (0..n).into_par_iter().map(|_| Sum::default()).collect()
+}
+
+type Top = BinaryHeap<Reverse<(u64, Reverse<usize>)>>;
+
 /// The `k` items with the largest key, largest first. Of equal keys, the
 /// lowest index comes first.
-fn largest(k: usize, items: impl Iterator<Item = (u64, usize)>) -> Vec<(u64, usize)> {
-    let mut heap = BinaryHeap::with_capacity(k + 1);
-    for (key, i) in items {
-        let item = (key, Reverse(i));
+fn largest(k: usize, items: impl ParallelIterator<Item = (u64, usize)>) -> Vec<(u64, usize)> {
+    let offer = |heap: &mut Top, item: (u64, Reverse<usize>)| {
         if heap.len() < k {
             heap.push(Reverse(item));
         } else if heap.peek().is_some_and(|Reverse(min)| item > *min) {
             heap.pop();
             heap.push(Reverse(item));
         }
-    }
-    heap.into_sorted_vec()
+    };
+    items
+        .fold(Top::new, |mut heap, (key, i)| {
+            offer(&mut heap, (key, Reverse(i)));
+            heap
+        })
+        .reduce(Top::new, |mut a, b| {
+            for Reverse(item) in b {
+                offer(&mut a, item);
+            }
+            a
+        })
+        .into_sorted_vec()
         .into_iter()
         .map(|Reverse((key, Reverse(i)))| (key, i))
         .collect()
@@ -230,7 +329,8 @@ fn date(time: i64) -> String {
 ///
 /// `scripts/benchmarks/harness.py` reads the `Parse:`, `Attribution:`,
 /// `Paths:`, `Reachability:` and `Total:` lines of the timing section, and
-/// takes the last `Total:` line. Keep them last.
+/// takes the last `Total:` line. Keep them last. Paths and reachability run
+/// at the same time, so their times overlap.
 fn print_summary(
     parsed: &ParseResult,
     attribution: &Attribution,
@@ -332,11 +432,11 @@ mod tests {
     fn largest_gives_the_k_largest_keys_and_the_lowest_index_on_a_tie() {
         let items = [(5, 0), (9, 1), (5, 2), (1, 3), (9, 4), (7, 5)];
         assert_eq!(
-            largest(4, items.into_iter()),
+            largest(4, items.into_par_iter()),
             [(9, 1), (9, 4), (7, 5), (5, 0)]
         );
-        assert_eq!(largest(10, items.into_iter()).len(), 6);
-        assert!(largest(0, items.into_iter()).is_empty());
+        assert_eq!(largest(10, items.into_par_iter()).len(), 6);
+        assert!(largest(0, items.into_par_iter()).is_empty());
     }
 
     #[test]

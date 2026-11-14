@@ -9,7 +9,7 @@ The parser reads the Git object store directly. It does not start `git` processe
 
 After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. It also reads the reflogs and the index file. Pass 2, and the header read and the sorts by hash of pass 1, use more than one thread. The other steps of the parse use one thread.
 
-After the parse, the program ranks the commits and finds the commit that introduced each tree and each blob (see "Attribution"). Then it finds the path where each tree and blob was added (see "Paths"), and the liveness of each object (see "Reachability").
+After the parse, the program ranks the commits and finds the commit that introduced each tree and each blob (see "Attribution"). Then, at the same time, it finds the path where each tree and blob was added (see "Paths") and the liveness of each object (see "Reachability"). Both calculations use all threads, but each one has steps that use fewer threads. When they run at the same time, `init` is approximately 0.25 s faster on linux and on the large monorepo. Then `init` makes the analysis section of the summary.
 
 For the meaning of terms such as work unit, worker, and delta family, refer to "Terms" in [README.md](README.md).
 
