@@ -26,6 +26,11 @@ pub enum Commands {
         /// resolved delta bases while a work unit is read; 0 caches nothing.
         #[arg(long, value_parser = git_dag_parser_core::size::parse_size, default_value = "1gb")]
         delta_cache_size: u64,
+
+        /// Also print the analysis: the largest objects, and the commits,
+        /// paths and directories with the most data
+        #[arg(long)]
+        report: bool,
     },
 
     /// Analyze the parsed DAG and generate reports
