@@ -172,8 +172,24 @@ Total:  208.514845ms
 - `Distinct paths` shows the number of rows in the path table: the paths where the owner commits added their trees and blobs, and the parent directories of these paths. The empty path of the root trees is one of them.
 - `Roots` shows the number of refs, the number of reflog entries in `logs/HEAD` and `logs/refs/`, and the number of different objects that the index file keeps.
 - `Ref`, `IndexOnly`, `ReflogOnly`, and `Unreachable` show the number of objects in each liveness state, and the sum of their sizes on disk. The four lines count each object one time. `git reflog expire` and `git gc` can remove the `ReflogOnly` objects after their reflog entries expire. `git gc` can remove the `Unreachable` objects.
-- `Pass 1` and `Pass 2` show the time of each pass. `Parse` shows the time that the program uses to parse the objects. `Attribution` shows the time of the rank and owner calculation. `Paths` shows the time of the path calculation. `Reachability` shows the time of the liveness calculation. The path calculation and the liveness calculation run at the same time, thus their times overlap. `Analysis` shows the time of the analysis section. `Total` shows the time for the full command.
-- The `=== Analysis ===` section comes before the timing section. It shows the largest blobs, the largest blobs that no ref keeps, the largest trees, the commits that add the most blob data, the paths with the most blob versions, and the directories with the most data on disk. Each line shows the size, the size on disk, the liveness state, the commit that added the object (the first 10 hex digits and the date), and the path. A directory line adds the disk size of all versions of the directory tree to the disk size of the blobs directly in the directory. Thus a directory with many entries that changes frequently shows its full cost, also if each file in it is small.
+- `Pass 1` and `Pass 2` show the time of each pass. `Parse` shows the time that the program uses to parse the objects. `Attribution` shows the time of the rank and owner calculation. `Paths` shows the time of the path calculation. `Reachability` shows the time of the liveness calculation. The path calculation and the liveness calculation run at the same time, thus their times overlap. `Analysis` shows the time of the analysis section. This line is there only with `--report`. `Total` shows the time for the full command.
+- The `=== Analysis ===` section comes before the timing section. It is there only with `--report`. It shows the largest blobs, the largest blobs that no ref keeps, the largest trees, the commits that add the most blob data, the paths with the most blob versions, and the directories with the most data on disk. Each line shows the size, the size on disk, the liveness state, the commit that added the object (the first 10 hex digits and the date), and the path. A directory line adds the disk size of all versions of the directory tree to the disk size of the blobs directly in the directory. Thus a directory with many entries that changes frequently shows its full cost, also if each file in it is small.
+- The analysis also shows:
+  - The count, size, and disk size of each object type (commits, trees, blobs, tags), and the percentage of the disk size of all objects.
+  - The directories with the most data on disk, with all subdirectories. Such a line adds the trees and blobs of all paths below the directory. The root directory is not in the list, because it contains all trees and blobs that have a path.
+  - The number of refs of each kind: `Branch` (`refs/heads/`), `Remote` (`refs/remotes/`), `Tag` (`refs/tags/`), `Stash`, `Head` (a detached `HEAD`), and `Other`. Many refs do not use disk space, but each fetch sends more refs.
+  - The copies on disk that are not the primary copy of their object: an object in two packs, or a loose copy of an object that a pack also contains. `git gc` removes these copies.
+  - The largest objects whose primary copy is not a delta. A large object that is not a delta and has a disk size near its size does not compress, and Git did not find a similar object for a delta.
+
+### The analysis
+
+To show the analysis section, use `--report`:
+
+```
+target/release/git-dag-parser init --repo /path/to/repo --report
+```
+
+The analysis passes use the data in memory. They do not need a database file. On linux and on the large monorepo, they add 0.15 s or less. Without `--report`, `init` does not do the analysis passes.
 
 ### Threads and memory
 
@@ -209,7 +225,7 @@ The repository is a Cargo workspace. Without `--workspace`, `cargo test` tests o
 
 - The unit tests are in the source files, in `#[cfg(test)]` modules.
 - The integration tests of the parser are in `crates/git-dag-parser-core/tests/`. Each test makes a small repository with `git`. Then it compares the parser output with the output of `git`. The tests make the repositories with the `Repo` fixtures of `crates/test-fixtures`. `index_and_reflogs.rs` compares the index roots with `git ls-files --stage` and `git write-tree`, and the reflog entries with `git reflog show`.
-- The integration tests of the program are in `tests/`. They use the same fixtures. `tests/attribution.rs` compares the commit that introduced each object with `git rev-list`. `tests/paths.rs` compares the path of each object with `git ls-tree`. `tests/reachability.rs` compares the liveness of each object with `git rev-list --all`, `--indexed-objects`, and `--reflog`.
+- The integration tests of the program are in `tests/`. They use the same fixtures. `tests/attribution.rs` compares the commit that introduced each object with `git rev-list`. `tests/paths.rs` compares the path of each object with `git ls-tree`. `tests/reachability.rs` compares the liveness of each object with `git rev-list --all`, `--indexed-objects`, and `--reflog`. `tests/init.rs` runs `init` with and without `--report`, and makes sure that only `--report` shows the analysis. `tests/report.rs` compares the directory totals with `git ls-tree -r -l`, and the copies that are not primary with `git verify-pack` and the loose object files.
 
 For each pull request and each push to `main`, the CI workflow (`.github/workflows/ci.yml`) runs the tests, `cargo clippy`, and `cargo fmt --check` for all crates on Linux, macOS, and Windows.
 

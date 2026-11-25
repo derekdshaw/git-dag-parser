@@ -61,11 +61,13 @@ fn main() -> anyhow::Result<()> {
         cli::Commands::Init {
             repo,
             delta_cache_size,
+            report,
         } => commands::init::run(
             &repo,
             &parser::ParseOptions {
                 delta_cache_limit: delta_cache_size,
             },
+            report,
         ),
         cli::Commands::Analyze { dag_file } => commands::analyze::run(&dag_file),
         cli::Commands::Query { dag_file, query } => commands::query::run(&dag_file, &query),

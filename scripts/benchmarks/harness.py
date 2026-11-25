@@ -56,6 +56,8 @@ PHASES = {
     "attribution_s": r"^Attribution:\s+(\S+)$",
     "paths_s": r"^Paths:\s+(\S+)$",
     "reachability_s": r"^Reachability:\s+(\S+)$",
+    # Only with `init --report`
+    "analysis_s": r"^Analysis:\s+(\S+)$",
     "total_s": r"^Total:\s+(\S+)$",
 }
 

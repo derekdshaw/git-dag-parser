@@ -9,7 +9,7 @@ The parser reads the Git object store directly. It does not start `git` processe
 
 After the two passes, the parser connects commits, tags, and refs to the objects that they refer to. It also reads the reflogs and the index file. Pass 2, and the header read and the sorts by hash of pass 1, use more than one thread. The other steps of the parse use one thread.
 
-After the parse, the program ranks the commits and finds the commit that introduced each tree and each blob (see "Attribution"). Then, at the same time, it finds the path where each tree and blob was added (see "Paths") and the liveness of each object (see "Reachability"). Both calculations use all threads, but each one has steps that use fewer threads. When they run at the same time, `init` is approximately 0.25 s faster on linux and on the large monorepo. Then `init` makes the analysis section of the summary.
+After the parse, the program ranks the commits and finds the commit that introduced each tree and each blob (see "Attribution"). Then, at the same time, it finds the path where each tree and blob was added (see "Paths") and the liveness of each object (see "Reachability"). Both calculations use all threads, but each one has steps that use fewer threads. When they run at the same time, `init` is approximately 0.25 s faster on linux and on the large monorepo. With `--report`, `init` then makes the analysis section of the summary (see `src/report.rs`).
 
 For the meaning of terms such as work unit, worker, and delta family, refer to "Terms" in [README.md](README.md).
 
@@ -34,7 +34,8 @@ The program, at the root:
 | `src/main.rs` | Sets the memory allocator, the log output, and the number of threads. Then it runs the command. |
 | `src/cli.rs` | The command-line arguments (`clap`). |
 | `src/progress.rs` | `ProgressLayer`, which draws the progress bar of pass 2 from the progress events of the library. |
-| `src/commands/init.rs` | The `init` command. It finds the Git directory with `find_git_dir`, parses the objects, calculates the attribution, the paths, and the reachability, and shows the summary. |
+| `src/commands/init.rs` | The `init` command. It finds the Git directory with `find_git_dir`, parses the objects, calculates the attribution, the paths, and the reachability, and shows the summary. With `--report`, it also shows the analysis. |
+| `src/report.rs` | The analysis passes of `init --report`: the largest objects, and the commits, paths and directories with the most data. `directories` gives the totals of each directory, also with all subdirectories. `overhead` gives the copies that are not primary. |
 | `src/attribution/mod.rs` | `Attribution`: the corrected date and the rank of each commit, and the commit that introduced each tree and blob. |
 | `src/attribution/rank.rs` | The corrected dates and the rank order of the commits. |
 | `src/attribution/owner.rs` | The owner of each tree and blob, with the frontier method. |
@@ -568,7 +569,7 @@ The tests are at three levels:
 
 - Unit tests are in `#[cfg(test)]` modules in the source files. They use data that the test makes.
 - Integration tests in `crates/git-dag-parser-core/tests/` make small repositories with `git`, with the `Repo` fixtures of `crates/test-fixtures`. They compare the result of the parser with the output of `git`.
-- Integration tests of the program in the root `tests/` use the same fixtures. `tests/attribution.rs` compares the attribution with `git rev-list` and with a walk of the commits in rank order on one thread. `tests/paths.rs` compares the path of each object with `git ls-tree`. `tests/reachability.rs` compares the liveness of each object with `git rev-list --all`, `--indexed-objects`, and `--reflog`.
+- Integration tests of the program in the root `tests/` use the same fixtures. `tests/attribution.rs` compares the attribution with `git rev-list` and with a walk of the commits in rank order on one thread. `tests/paths.rs` compares the path of each object with `git ls-tree`. `tests/reachability.rs` compares the liveness of each object with `git rev-list --all`, `--indexed-objects`, and `--reflog`. `tests/init.rs` runs `init` with and without `--report`, and makes sure that only `--report` shows the analysis. `tests/report.rs` compares the directory totals with `git ls-tree -r -l`, and the copies that are not primary with `git verify-pack` and the loose object files.
 - The `git_oracle` test parses large repositories and compares the result with `git`. It runs only when you tell Cargo to run it.
 
 The CI workflow runs the unit tests and the integration tests on Linux, macOS, and Windows. It does not run `git_oracle` or the benchmarks.
