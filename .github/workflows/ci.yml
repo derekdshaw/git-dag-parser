@@ -5,8 +5,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # A release is published only by a manual run on main.
-  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -83,6 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.current.outputs.version }}
+      release: ${{ steps.release.outputs.release }}
 
     steps:
       - uses: actions/checkout@v5
@@ -97,9 +96,19 @@ jobs:
           fi
           echo "version=v$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Release if this is a push to main with a new version
+        id: release
+        run: |
+          RELEASE=false
+          if [ "${{ github.event_name }}" = push ] && [ "${{ github.ref }}" = refs/heads/main ] &&
+             ! git ls-remote --exit-code --tags origin "refs/tags/${{ steps.current.outputs.version }}" >/dev/null; then
+            RELEASE=true
+          fi
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+
   build-release:
-    # Runs on every event as a dry run of the release builds. Only
-    # publish-release makes a tag and a release from these archives.
+    # Runs on every event. On pull requests and on pushes to main that do
+    # not change the version, it is a dry run of the release builds.
     name: Build (${{ matrix.target }})
     needs: [test, bench, version]
     runs-on: ${{ matrix.os }}
@@ -190,22 +199,14 @@ jobs:
   publish-release:
     name: Tag and publish release
     needs: [version, build-release]
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    # A push to main whose Cargo.toml version has no tag yet
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Stop if the tag exists
-        run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/${{ needs.version.outputs.version }}" >/dev/null; then
-            echo "::error::Tag ${{ needs.version.outputs.version }} exists. Change the version in Cargo.toml."
-            exit 1
-          fi
 
       - name: Create tag
         run: |

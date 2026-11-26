@@ -103,18 +103,11 @@ The name of each archive is `git-dag-parser-v<version>-<target>.<tar.gz|zip>`. E
 
 ### Publish a release
 
-A merge to `main` does not publish a release. To publish a release, do these steps:
+To publish a release, change `version` in the `[package]` section of `Cargo.toml`, and merge the change to `main`.
 
-1. Change `version` in the `[package]` section of `Cargo.toml`. Merge the change to `main`.
-2. Start the CI workflow manually on `main`. Use "Run workflow" on the Actions tab, or use this command:
+On each push to `main`, the CI workflow reads the version. If the tag `v<version>` does not exist, the workflow builds the five archives after the tests pass. Then it makes the tag `v<version>` on the commit that it built, and publishes the release with the archives. If the tag exists, the workflow does not make a tag or a release. It does not change a tag that exists. A version with a `-`, such as `0.2.0-rc.1`, gives a prerelease.
 
-   ```
-   gh workflow run ci.yml --ref main
-   ```
-
-The workflow builds the five archives. Then it makes the tag `v<version>` on the commit that it built, and publishes the release with the archives. If the tag exists, the workflow stops with an error. It does not change a tag that exists.
-
-For each pull request and each push to `main`, the workflow also builds the five archives as a test. It does not make a tag or a release. The archives are workflow artifacts, and GitHub deletes them after 7 days.
+For each pull request, and for each push to `main` that does not change the version, the workflow also builds the five archives as a test. The archives are workflow artifacts, and GitHub deletes them after 7 days.
 
 ## Parse a repository
 
